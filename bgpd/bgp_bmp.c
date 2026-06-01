@@ -78,9 +78,25 @@ DEFINE_QOBJ_TYPE(bmp_targets);
 
 #define BMP_MON_SYNC_FLAGS (BMP_MON_PREPOLICY | BMP_MON_POSTPOLICY | BMP_MON_LOC_RIB)
 
+#define BMP_PEER_FLAG_V (1 << 7)
+#define BMP_PEER_FLAG_L (1 << 6)
+#define BMP_PEER_FLAG_A (1 << 5)
+
 static bool bmp_mon_needs_sync(uint8_t flags)
 {
 	return CHECK_FLAG(flags, BMP_MON_SYNC_FLAGS);
+}
+
+static uint8_t bmp_route_monitor_flags(bool adj_rib_out, bool post_policy)
+{
+	uint8_t flags = 0;
+
+	if (adj_rib_out)
+		SET_FLAG(flags, BMP_PEER_FLAG_A);
+	if (post_policy)
+		SET_FLAG(flags, BMP_PEER_FLAG_L);
+
+	return flags;
 }
 
 static int bmp_bgp_cmp(const struct bmp_bgp *a, const struct bmp_bgp *b)
@@ -345,10 +361,6 @@ static void bmp_per_peer_hdr(struct stream *s, struct bgp *bgp,
 			     uint64_t peer_distinguisher,
 			     const struct timeval *tv)
 {
-#define BMP_PEER_FLAG_V (1 << 7)
-#define BMP_PEER_FLAG_L (1 << 6)
-#define BMP_PEER_FLAG_A (1 << 5)
-
 	bool is_locrib = peer_type_flag == BMP_PEER_TYPE_LOC_RIB_INSTANCE;
 
 	/* Peer Type */
@@ -1332,7 +1344,7 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 }
 
 static void bmp_monitor_adjout(struct bmp *bmp, struct peer *peer,
-			       struct peer *from, uint8_t flags,
+			       struct peer *from, bool post_policy,
 			       const struct prefix *p, struct prefix_rd *prd,
 			       struct attr *attr, afi_t afi, safi_t safi,
 			       mpls_label_t *label, uint8_t num_labels,
@@ -1340,6 +1352,7 @@ static void bmp_monitor_adjout(struct bmp *bmp, struct peer *peer,
 {
 	struct stream *hdr, *msg;
 	uint8_t peer_type_flag = bmp_get_peer_type(peer);
+	uint8_t flags = bmp_route_monitor_flags(true, post_policy);
 	uint64_t peer_distinguisher = 0;
 
 	if (bmp_get_peer_distinguisher(peer->bgp, afi, peer_type_flag,
@@ -1808,7 +1821,6 @@ static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 	struct bmp_queue_entry *bqe;
 	struct peer *peer, *from = NULL;
 	bool written = false;
-	uint8_t flags = BMP_PEER_FLAG_A;
 	uint8_t num_labels = 0;
 	mpls_label_t *label = NULL;
 
@@ -1835,9 +1847,6 @@ static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 	if (bqe->source_peerid)
 		from = QOBJ_GET_TYPESAFE(bqe->source_peerid, peer);
 
-	if (bqe->out_post_policy)
-		SET_FLAG(flags, BMP_PEER_FLAG_L);
-
 	if (bqe->labels) {
 		num_labels = bqe->labels->num_labels;
 		label = num_labels ? &bqe->labels->label[0] : NULL;
@@ -1847,8 +1856,9 @@ static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 		      safi == SAFI_MPLS_VPN;
 	struct prefix_rd *prd = is_vpn ? &bqe->rd : NULL;
 
-	bmp_monitor_adjout(bmp, peer, from, flags, &bqe->p, prd, bqe->attr,
-			   afi, safi, label, num_labels, bqe->addpath_tx_id);
+	bmp_monitor_adjout(bmp, peer, from, bqe->out_post_policy, &bqe->p,
+			   prd, bqe->attr, afi, safi, label, num_labels,
+			   bqe->addpath_tx_id);
 	written = true;
 
 out:
