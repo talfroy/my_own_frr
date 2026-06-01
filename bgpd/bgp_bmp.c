@@ -75,6 +75,13 @@ DEFINE_MTYPE_STATIC(BMP, BMP_IMPORTED_BGP, "BMP imported BGP instance");
 
 DEFINE_QOBJ_TYPE(bmp_targets);
 
+#define BMP_MON_SYNC_FLAGS (BMP_MON_PREPOLICY | BMP_MON_POSTPOLICY | BMP_MON_LOC_RIB)
+
+static bool bmp_mon_needs_sync(uint8_t flags)
+{
+    return CHECK_FLAG(flags, BMP_MON_SYNC_FLAGS);
+}
+
 static int bmp_bgp_cmp(const struct bmp_bgp *a, const struct bmp_bgp *b)
 {
 	if (a->bgp < b->bgp)
@@ -229,7 +236,7 @@ static struct bmp *bmp_new(struct bmp_targets *bt, int bmp_sock)
 	new->sync_bgp = NULL;
 
 	FOREACH_AFI_SAFI (afi, safi) {
-		new->afistate[afi][safi] = bt->afimon[afi][safi]
+		new->afistate[afi][safi] = bmp_mon_needs_sync(bt->afimon[afi][safi])
 			? BMP_AFI_NEEDSYNC : BMP_AFI_INACTIVE;
 	}
 
@@ -1280,7 +1287,7 @@ static void bmp_update_syncro(struct bmp *bmp, afi_t afi, safi_t safi, struct bg
 		bmp->sync_bgp = NULL;
 	}
 
-	if (!bmp->targets->afimon[afi][safi]) {
+	if (!bmp_mon_needs_sync(bmp->targets->afimon[afi][safi])) {
 		bmp->afistate[afi][safi] = BMP_AFI_INACTIVE;
 		return;
 	}
@@ -3089,15 +3096,20 @@ DEFPY(bmp_stats_send_experimental,
 
 #define BMP_POLICY_IS_LOCRIB(str) ((str)[0] == 'l') /* __l__oc-rib */
 #define BMP_POLICY_IS_PRE(str) ((str)[1] == 'r')    /* p__r__e-policy */
+#define BMP_POLICY_IS_OUT(str) ((str)[1] == 'u')	/* o__u__t-... */
+#define BMP_POLICY_IS_OUT_PRE(str) ((str)[5] == 'r')	/* out-p__r__e-policy */
+
 
 DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
-      "[no] bmp monitor <ipv4|ipv6|l2vpn> <unicast|multicast|evpn|vpn> <pre-policy|post-policy|loc-rib>$policy",
+      "[no] bmp monitor <ipv4|ipv6|l2vpn> <unicast|multicast|evpn|vpn> <pre-policy|post-policy|loc-rib|out-pre-policy|out-post-policy>$policy",
       NO_STR BMP_STR
       "Send BMP route monitoring messages\n" BGP_AF_STR BGP_AF_STR BGP_AF_STR
 	      BGP_AF_STR BGP_AF_STR BGP_AF_STR BGP_AF_STR
       "Send state before policy and filter processing\n"
       "Send state with policy and filters applied\n"
-      "Send state after decision process is applied\n")
+      "Send state after decision process is applied\n"
+	  "Send outbound state before policy and outbound filtering processing\n"
+	  "Send outbound state with policy and outbound filtering applied\n")
 {
 	int index = 0;
 	uint8_t flag, prev;
@@ -3112,6 +3124,12 @@ DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
 
 	if (BMP_POLICY_IS_LOCRIB(policy))
 		flag = BMP_MON_LOC_RIB;
+	else if (BMP_POLICY_IS_OUT(policy))	{	/* Case of Adj-RIB-out */
+		if (BMP_POLICY_IS_OUT_PRE(policy))
+			flag = BMP_MON_OUT_PREPOLICY;
+		else
+			flag = BMP_MON_OUT_POSTPOLICY;
+	}
 	else if (BMP_POLICY_IS_PRE(policy))
 		flag = BMP_MON_PREPOLICY;
 	else
@@ -3126,8 +3144,10 @@ DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
 	if (prev == bt->afimon[afi][safi])
 		return CMD_SUCCESS;
 
-	frr_each (bmp_session, &bt->sessions, bmp)
-		bmp_update_syncro(bmp, afi, safi, NULL);
+	if (bmp_mon_needs_sync(flag)) {
+		frr_each (bmp_session, &bt->sessions, bmp)
+			bmp_update_syncro(bmp, afi, safi, NULL);
+	}
 
 	return CMD_SUCCESS;
 }
@@ -3248,15 +3268,26 @@ DEFPY(show_bmp,
 						   BMP_MON_POSTPOLICY)
 						? "post-policy "
 						: "";
+				const char *out_pre_str =
+					CHECK_FLAG(afimon_flag,
+						   BMP_MON_OUT_PREPOLICY)
+						? "out-pre-policy "
+						: "";
+				const char *out_post_str =
+					CHECK_FLAG(afimon_flag,
+						   BMP_MON_OUT_POSTPOLICY)
+						? "out-post-policy "
+						: "";
 				const char *locrib_str =
 					CHECK_FLAG(afimon_flag, BMP_MON_LOC_RIB)
 						? "loc-rib"
 						: "";
 
 				vty_out(vty,
-					"    Route Monitoring %s %s %s%s%s\n",
+					"    Route Monitoring %s %s %s%s%s%s%s\n",
 					afi2str(afi), safi2str(safi), pre_str,
-					post_str, locrib_str);
+					post_str, out_pre_str, out_post_str,
+					locrib_str);
 			}
 
 			vty_out(vty, "    Listeners:\n");
@@ -3387,6 +3418,16 @@ static int bmp_config_write(struct bgp *bgp, struct vty *vty)
 				       BMP_MON_POSTPOLICY))
 				vty_out(vty,
 					"  bmp monitor %s %s post-policy\n",
+					afi2str_lower(afi), safi2str(safi));
+			if (CHECK_FLAG(bt->afimon[afi][safi],
+				       BMP_MON_OUT_PREPOLICY))
+				vty_out(vty,
+					"  bmp monitor %s %s out-pre-policy\n",
+					afi2str_lower(afi), safi2str(safi));
+			if (CHECK_FLAG(bt->afimon[afi][safi],
+				       BMP_MON_OUT_POSTPOLICY))
+				vty_out(vty,
+					"  bmp monitor %s %s out-post-policy\n",
 					afi2str_lower(afi), safi2str(safi));
 			if (CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_LOC_RIB))
 				vty_out(vty, "  bmp monitor %s %s loc-rib\n",
