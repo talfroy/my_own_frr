@@ -660,6 +660,9 @@ bool bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 	else
 		adj->labels = NULL;
 
+	hook_call(bgp_adj_out_update, subgrp, dest, path, adv->baa->attr,
+		  adj->labels, adj->addpath_tx_id, true, false);
+
 	/* Add new advertisement to advertisement attribute list. */
 	bgp_advertise_add(adv->baa, adv);
 
@@ -734,6 +737,9 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest, struct update_subgroup *s
 			adv = adj->adv;
 			adv->dest = dest;
 			adv->adj = adj;
+
+			hook_call(bgp_adj_out_update, subgrp, dest, NULL,
+				  NULL, NULL, adj->addpath_tx_id, true, true);
 
 			/*
 			 * If the update withdraw list is empty, trigger the MRAI

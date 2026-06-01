@@ -42,6 +42,7 @@
 #include "bgpd/bgp_label.h"
 #include "bgpd/bgp_open.h"
 #include "bgpd/bgp_aspath.h"
+#include "bgpd/bgp_addpath.h"
 
 static void bmp_close(struct bmp *bmp);
 static struct bmp_bgp *bmp_bgp_find(struct bgp *bgp);
@@ -79,7 +80,7 @@ DEFINE_QOBJ_TYPE(bmp_targets);
 
 static bool bmp_mon_needs_sync(uint8_t flags)
 {
-    return CHECK_FLAG(flags, BMP_MON_SYNC_FLAGS);
+	return CHECK_FLAG(flags, BMP_MON_SYNC_FLAGS);
 }
 
 static int bmp_bgp_cmp(const struct bmp_bgp *a, const struct bmp_bgp *b)
@@ -280,6 +281,22 @@ static inline int bmp_get_peer_type(struct peer *peer)
 		return BMP_PEER_TYPE_LOC_RIB_INSTANCE;
 
 	return bmp_get_peer_type_vrf(peer->bgp->vrf_id);
+}
+
+static void bmp_queue_entry_clear(struct bmp_queue_entry *bqe)
+{
+	if (!bqe)
+		return;
+
+	if (bqe->attr)
+		bgp_attr_unintern(&bqe->attr);
+	bgp_labels_unintern(&bqe->labels);
+}
+
+static void bmp_queue_entry_free(struct bmp_queue_entry *bqe)
+{
+	bmp_queue_entry_clear(bqe);
+	XFREE(MTYPE_BMP_QUEUE, bqe);
 }
 
 static inline int bmp_get_peer_distinguisher(struct bgp *bgp, afi_t afi, uint8_t peer_type,
@@ -1167,6 +1184,63 @@ static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 	return s;
 }
 
+static struct stream *
+bmp_update_adjout(const struct prefix *p, struct prefix_rd *prd,
+		  struct peer *peer, struct peer *from, struct attr *attr,
+		  afi_t afi, safi_t safi, mpls_label_t *label,
+		  uint8_t num_labels, uint32_t addpath_tx_id)
+{
+	struct bpacket_attr_vec_arr vecarr;
+	struct stream *s;
+	size_t attrlen_pos = 0, mpattrlen_pos = 0;
+	bgp_size_t total_attr_len = 0;
+	bool addpath_capable;
+
+	bpacket_attr_vec_arr_reset(&vecarr);
+
+	s = stream_new_expandable(BGP_MAX_PACKET_SIZE);
+	bgp_packet_set_marker(s, BGP_MSG_UPDATE);
+
+	stream_putw(s, 0);
+
+	attrlen_pos = stream_get_endp(s);
+	stream_putw(s, 0);
+
+	addpath_capable = bgp_addpath_encode_tx(peer, afi, safi);
+	total_attr_len = bgp_packet_attribute(NULL, peer, s, attr, &vecarr,
+					      NULL, afi, safi, from, NULL,
+					      label, num_labels, 0,
+					      addpath_capable, addpath_tx_id,
+					      NULL, NULL, false);
+
+	if (afi == AFI_IP && safi == SAFI_UNICAST &&
+	    !peer_cap_enhe(peer, afi, safi)) {
+		bgp_attr_stream_put_prefix_addpath(s, p, addpath_capable,
+						   addpath_tx_id);
+	} else {
+		size_t p1 = stream_get_endp(s);
+
+		mpattrlen_pos = bgp_packet_mpattr_start(s, peer, afi, safi,
+							&vecarr, attr);
+		bgp_packet_mpattr_prefix(s, afi, safi, p, prd, label,
+					 num_labels, addpath_capable,
+					 addpath_tx_id, attr, NULL);
+		bgp_packet_mpattr_end(s, mpattrlen_pos);
+		total_attr_len += stream_get_endp(s) - p1;
+	}
+
+	if (stream_get_endp(s) > BGP_MAX_PACKET_SIZE) {
+		zlog_warn("bmp: skipping adj-rib-out route-monitoring for %pFX: encoded UPDATE exceeds %u bytes",
+			  p, BGP_MAX_PACKET_SIZE);
+		stream_free(s);
+		return NULL;
+	}
+
+	stream_putw_at(s, attrlen_pos, total_attr_len);
+	bgp_packet_set_size(s);
+	return s;
+}
+
 static struct stream *bmp_withdraw(const struct prefix *p,
 				   struct prefix_rd *prd, afi_t afi,
 				   safi_t safi)
@@ -1249,6 +1323,48 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 
 	stream_putl_at(hdr, BMP_LENGTH_POS,
 			stream_get_endp(hdr) + stream_get_endp(msg));
+
+	bmp->cnt_update++;
+	pullwr_write_stream(bmp->pullwr, hdr);
+	pullwr_write_stream(bmp->pullwr, msg);
+	stream_free(hdr);
+	stream_free(msg);
+}
+
+static void bmp_monitor_adjout(struct bmp *bmp, struct peer *peer,
+			       struct peer *from, uint8_t flags,
+			       const struct prefix *p, struct prefix_rd *prd,
+			       struct attr *attr, afi_t afi, safi_t safi,
+			       mpls_label_t *label, uint8_t num_labels,
+			       uint32_t addpath_tx_id)
+{
+	struct stream *hdr, *msg;
+	uint8_t peer_type_flag = bmp_get_peer_type(peer);
+	uint64_t peer_distinguisher = 0;
+
+	if (bmp_get_peer_distinguisher(peer->bgp, afi, peer_type_flag,
+				       &peer_distinguisher)) {
+		zlog_warn(
+			"skipping bmp message for reason: can't get peer distinguisher");
+		return;
+	}
+
+	if (attr)
+		msg = bmp_update_adjout(p, prd, peer, from, attr, afi, safi,
+					label, num_labels, addpath_tx_id);
+	else
+		msg = bmp_withdraw(p, prd, afi, safi);
+
+	if (!msg)
+		return;
+
+	hdr = stream_new(BGP_MAX_PACKET_SIZE);
+	bmp_common_hdr(hdr, BMP_VERSION_3, BMP_TYPE_ROUTE_MONITORING);
+	bmp_per_peer_hdr(hdr, peer->bgp, peer, flags, peer_type_flag,
+			 peer_distinguisher, NULL);
+
+	stream_putl_at(hdr, BMP_LENGTH_POS,
+		       stream_get_endp(hdr) + stream_get_endp(msg));
 
 	bmp->cnt_update++;
 	pullwr_write_stream(bmp->pullwr, hdr);
@@ -1588,6 +1704,13 @@ static inline struct bmp_queue_entry *bmp_pull_locrib(struct bmp *bmp)
 				   &bmp->locrib_queuepos);
 }
 
+static inline struct bmp_queue_entry *bmp_pull_adjout(struct bmp *bmp)
+{
+	return bmp_pull_from_queue(&bmp->targets->outupdlist,
+				   &bmp->targets->outupdhash,
+				   &bmp->out_queuepos);
+}
+
 /* TODO BMP_MON_LOCRIB find a way to merge properly this function with
  * bmp_wrqueue or abstract it if possible
  */
@@ -1669,12 +1792,70 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 
 out:
 	if (!bqe->refcount)
-		XFREE(MTYPE_BMP_QUEUE, bqe);
+		bmp_queue_entry_free(bqe);
 
 	if (bn)
 		bgp_dest_unlock_node(bn);
 
 	if (!written && bmp->locrib_queuepos)
+		pullwr_bump(bmp->pullwr);
+
+	return written;
+}
+
+static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
+{
+	struct bmp_queue_entry *bqe;
+	struct peer *peer, *from = NULL;
+	bool written = false;
+	uint8_t flags = BMP_PEER_FLAG_A;
+	uint8_t num_labels = 0;
+	mpls_label_t *label = NULL;
+
+	bqe = bmp_pull_adjout(bmp);
+	if (!bqe)
+		return false;
+
+	afi_t afi = bqe->afi;
+	safi_t safi = bqe->safi;
+	uint8_t mon_flag = bqe->out_post_policy ? BMP_MON_OUT_POSTPOLICY
+						: BMP_MON_OUT_PREPOLICY;
+
+	if (!CHECK_FLAG(bmp->targets->afimon[afi][safi], mon_flag))
+		goto out;
+
+	peer = QOBJ_GET_TYPESAFE(bqe->peerid, peer);
+	if (!peer) {
+		zlog_info("bmp: skipping adj-rib-out queued item for deleted peer");
+		goto out;
+	}
+	if (!peer_established(peer->connection))
+		goto out;
+
+	if (bqe->source_peerid)
+		from = QOBJ_GET_TYPESAFE(bqe->source_peerid, peer);
+
+	if (bqe->out_post_policy)
+		SET_FLAG(flags, BMP_PEER_FLAG_L);
+
+	if (bqe->labels) {
+		num_labels = bqe->labels->num_labels;
+		label = num_labels ? &bqe->labels->label[0] : NULL;
+	}
+
+	bool is_vpn = (afi == AFI_L2VPN && safi == SAFI_EVPN) ||
+		      safi == SAFI_MPLS_VPN;
+	struct prefix_rd *prd = is_vpn ? &bqe->rd : NULL;
+
+	bmp_monitor_adjout(bmp, peer, from, flags, &bqe->p, prd, bqe->attr,
+			   afi, safi, label, num_labels, bqe->addpath_tx_id);
+	written = true;
+
+out:
+	if (!bqe->refcount)
+		bmp_queue_entry_free(bqe);
+
+	if (!written && bmp->out_queuepos)
 		pullwr_bump(bmp->pullwr);
 
 	return written;
@@ -1765,7 +1946,7 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 
 out:
 	if (!bqe->refcount)
-		XFREE(MTYPE_BMP_QUEUE, bqe);
+		bmp_queue_entry_free(bqe);
 
 	if (bn)
 		bgp_dest_unlock_node(bn);
@@ -1794,6 +1975,8 @@ static void bmp_wrfill(struct bmp *bmp, struct pullwr *pullwr)
 		if (bmp_wrmirror(bmp, pullwr))
 			break;
 		if (bmp_wrqueue(bmp, pullwr))
+			break;
+		if (bmp_wrqueue_adjout(bmp, pullwr))
 			break;
 		if (bmp_wrqueue_locrib(bmp, pullwr))
 			break;
@@ -1862,6 +2045,67 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_rbtree_head *updhash,
 	 */
 }
 
+static void bmp_queue_entry_update_attr(struct bmp_queue_entry *bqe,
+					struct attr *attr,
+					struct bgp_labels *labels)
+{
+	bmp_queue_entry_clear(bqe);
+
+	if (attr)
+		bqe->attr = bgp_attr_intern(attr);
+	if (labels)
+		bqe->labels = bgp_labels_intern(labels);
+}
+
+static struct bmp_queue_entry *
+bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
+		       struct bgp_dest *bn, struct peer *peer, struct peer *from,
+		       struct attr *attr, struct bgp_labels *labels,
+		       uint32_t addpath_tx_id, bool post_policy)
+{
+	struct bmp_queue_entry *bqe, bqeref;
+	size_t refcount;
+
+	refcount = bmp_session_count(&bt->sessions);
+	if (refcount == 0)
+		return NULL;
+
+	memset(&bqeref, 0, sizeof(bqeref));
+	prefix_copy(&bqeref.p, bgp_dest_get_prefix(bn));
+	bqeref.peerid = peer->qobj_node.nid;
+	bqeref.source_peerid = from ? from->qobj_node.nid : 0;
+	bqeref.afi = afi;
+	bqeref.safi = safi;
+	bqeref.addpath_tx_id = addpath_tx_id;
+	bqeref.out_post_policy = post_policy;
+
+	if ((afi == AFI_L2VPN && safi == SAFI_EVPN && bn->pdest) ||
+	    safi == SAFI_MPLS_VPN)
+		prefix_copy(&bqeref.rd,
+			    (struct prefix_rd *)bgp_dest_get_prefix(bn->pdest));
+
+	bqe = bmp_rbtree_find(&bt->outupdhash, &bqeref);
+	if (bqe) {
+		bqe->source_peerid = bqeref.source_peerid;
+		bmp_queue_entry_update_attr(bqe, attr, labels);
+		if (bqe->refcount >= refcount)
+			return NULL;
+
+		bmp_qlist_del(&bt->outupdlist, bqe);
+	} else {
+		bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
+		memcpy(bqe, &bqeref, sizeof(*bqe));
+		bmp_queue_entry_update_attr(bqe, attr, labels);
+
+		bmp_rbtree_add(&bt->outupdhash, bqe);
+	}
+
+	bqe->refcount = refcount;
+	bmp_qlist_add_tail(&bt->outupdlist, bqe);
+
+	return bqe;
+}
+
 static int bmp_process(struct bgp *bgp, afi_t afi, safi_t safi,
 		       struct bgp_dest *bn, struct peer *peer, bool withdraw)
 {
@@ -1910,6 +2154,65 @@ static int bmp_process(struct bgp *bgp, afi_t afi, safi_t safi,
 			}
 		}
 	}
+	return 0;
+}
+
+static int bmp_process_adjout(struct update_subgroup *subgrp,
+			      struct bgp_dest *bn, struct bgp_path_info *path,
+			      struct attr *attr, struct bgp_labels *labels,
+			      uint32_t addpath_tx_id, bool post_policy,
+			      bool withdraw)
+{
+	struct bmp_bgp *bmpbgp;
+	struct bmp_targets *bt;
+	struct bmp *bmp;
+	struct bgp *bgp_vrf;
+	struct bgp *bgp = SUBGRP_INST(subgrp);
+	struct listnode *node;
+	struct peer_af *paf;
+	struct peer *from = path ? path->peer : NULL;
+	struct bmp_queue_entry *last_item;
+	afi_t afi = SUBGRP_AFI(subgrp);
+	safi_t safi = SUBGRP_SAFI(subgrp);
+	uint8_t mon_flag = post_policy ? BMP_MON_OUT_POSTPOLICY
+				       : BMP_MON_OUT_PREPOLICY;
+
+	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp_vrf)) {
+		bmpbgp = bmp_bgp_find(bgp_vrf);
+		if (!bmpbgp)
+			continue;
+
+		frr_each (bmp_targets, &bmpbgp->targets, bt) {
+			if (!CHECK_FLAG(bt->afimon[afi][safi], mon_flag))
+				continue;
+			if (bgp_vrf != bgp &&
+			    !bmp_imported_bgp_find(bt, bgp->name))
+				continue;
+
+			SUBGRP_FOREACH_PEER (subgrp, paf) {
+				struct peer *peer = PAF_PEER(paf);
+
+				if (!peer_established(peer->connection))
+					continue;
+
+				last_item = bmp_process_one_adjout(
+					bt, afi, safi, bn, peer, from,
+					withdraw ? NULL : attr,
+					withdraw ? NULL : labels, addpath_tx_id,
+					post_policy);
+				if (!last_item)
+					continue;
+
+				frr_each (bmp_session, &bt->sessions, bmp) {
+					if (!bmp->out_queuepos)
+						bmp->out_queuepos = last_item;
+
+					pullwr_bump(bmp->pullwr);
+				}
+			}
+		}
+	}
+
 	return 0;
 }
 
@@ -2164,10 +2467,15 @@ static void bmp_close(struct bmp *bmp)
 			XFREE(MTYPE_BMP_MIRRORQ, bmq);
 	while ((bqe = bmp_pull(bmp)))
 		if (!bqe->refcount)
-			XFREE(MTYPE_BMP_QUEUE, bqe);
+			bmp_queue_entry_free(bqe);
 	while ((bqe = bmp_pull_locrib(bmp)))
 		if (!bqe->refcount)
-			XFREE(MTYPE_BMP_QUEUE, bqe);
+			bmp_queue_entry_free(bqe);
+	while ((bqe = bmp_pull_from_queue(&bmp->targets->outupdlist,
+					  &bmp->targets->outupdhash,
+					  &bmp->out_queuepos)))
+		if (!bqe->refcount)
+			bmp_queue_entry_free(bqe);
 
 	event_cancel(&bmp->t_read);
 	pullwr_del(bmp->pullwr);
@@ -2367,6 +2675,8 @@ static struct bmp_targets *bmp_targets_get(struct bgp *bgp, const char *name)
 	bmp_qlist_init(&bt->updlist);
 	bmp_rbtree_init(&bt->locupdhash);
 	bmp_qlist_init(&bt->locupdlist);
+	bmp_rbtree_init(&bt->outupdhash);
+	bmp_qlist_init(&bt->outupdlist);
 	bmp_actives_init(&bt->actives);
 	bmp_listeners_init(&bt->listeners);
 	bmp_imported_bgps_init(&bt->imported_bgps);
@@ -2412,6 +2722,8 @@ static void bmp_targets_put(struct bmp_targets *bt)
 	bmp_qlist_fini(&bt->updlist);
 	bmp_rbtree_fini(&bt->locupdhash);
 	bmp_qlist_fini(&bt->locupdlist);
+	bmp_rbtree_fini(&bt->outupdhash);
+	bmp_qlist_fini(&bt->outupdlist);
 
 	XFREE(MTYPE_BMP_ACLNAME, bt->acl_name);
 	XFREE(MTYPE_BMP_ACLNAME, bt->acl6_name);
@@ -3124,7 +3436,8 @@ DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
 
 	if (BMP_POLICY_IS_LOCRIB(policy))
 		flag = BMP_MON_LOC_RIB;
-	else if (BMP_POLICY_IS_OUT(policy))	{	/* Case of Adj-RIB-out */
+	else if (BMP_POLICY_IS_OUT(policy)) {
+		/* Case of Adj-RIB-out */
 		if (BMP_POLICY_IS_OUT_PRE(policy))
 			flag = BMP_MON_OUT_PREPOLICY;
 		else
@@ -3746,6 +4059,7 @@ static int bgp_bmp_module_init(void)
 	hook_register(peer_status_changed, bmp_peer_status_changed);
 	hook_register(peer_backward_transition, bmp_peer_backward);
 	hook_register(bgp_process, bmp_process);
+	hook_register(bgp_adj_out_update, bmp_process_adjout);
 	hook_register(bgp_nht_path_update, bmp_nht_path_valid);
 	hook_register(bgp_inst_config_write, bmp_config_write);
 	hook_register(bgp_inst_delete, bmp_bgp_del);

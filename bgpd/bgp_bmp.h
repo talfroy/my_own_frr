@@ -64,11 +64,16 @@ struct bmp_queue_entry {
 	uint64_t peerid;
 	afi_t afi;
 	safi_t safi;
+	uint32_t addpath_tx_id;
+	bool out_post_policy;
 
 	size_t refcount;
+	uint64_t source_peerid;
 
 	/* initialized only for L2VPN/EVPN (S)AFIs */
 	struct prefix_rd rd;
+	struct attr *attr;
+	struct bgp_labels *labels;
 };
 
 /* This is for BMP Route Mirroring, which feeds fully raw BGP PDUs out to BMP
@@ -126,6 +131,7 @@ struct bmp {
 	 */
 	struct bmp_queue_entry *locrib_queuepos;
 	struct bmp_queue_entry *queuepos;
+	struct bmp_queue_entry *out_queuepos;
 	struct bmp_mirrorq *mirrorpos;
 	bool mirror_lost;
 
@@ -244,6 +250,9 @@ struct bmp_targets {
 
 	struct bmp_rbtree_head locupdhash;
 	struct bmp_qlist_head locupdlist;
+
+	struct bmp_rbtree_head outupdhash;
+	struct bmp_qlist_head outupdlist;
 
 	struct bmp_imported_bgps_head imported_bgps;
 

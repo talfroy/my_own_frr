@@ -120,6 +120,14 @@ DEFINE_HOOK(bgp_route_update,
 	     struct bgp_path_info *old_route, struct bgp_path_info *new_route),
 	    (bgp, afi, safi, bn, old_route, new_route));
 
+DEFINE_HOOK(bgp_adj_out_update,
+	    (struct update_subgroup *subgrp, struct bgp_dest *dest,
+	     struct bgp_path_info *path, struct attr *attr,
+	     struct bgp_labels *labels, uint32_t addpath_tx_id,
+	     bool post_policy, bool withdraw),
+	    (subgrp, dest, path, attr, labels, addpath_tx_id, post_policy,
+	     withdraw));
+
 /* Extern from bgp_dump.c */
 extern const char *bgp_origin_str[];
 extern const char *bgp_origin_long_str[];
@@ -3790,6 +3798,11 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 	advertise = bgp_check_advertise(bgp, dest, safi);
 
 	if (selected) {
+		hook_call(bgp_adj_out_update, subgrp, dest, selected,
+			  selected->attr,
+			  selected->extra ? selected->extra->labels : NULL,
+			  addpath_tx_id, false, false);
+
 		if (subgroup_announce_check(dest, selected, subgrp, p, pattr,
 					    NULL)) {
 			/* Route is selected, if the route is already installed
@@ -3836,6 +3849,9 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 
 	/* If selected is NULL we must withdraw the path using addpath_tx_id */
 	else {
+		hook_call(bgp_adj_out_update, subgrp, dest, NULL, NULL, NULL,
+			  addpath_tx_id, false, true);
+
 		bgp_adj_out_unset_subgroup(dest, subgrp, addpath_tx_id);
 	}
 }

@@ -18,6 +18,9 @@
 
 struct bgp_nexthop_cache;
 struct bgp_route_evpn;
+struct attr;
+struct bgp_labels;
+struct update_subgroup;
 
 enum bgp_show_type {
 	bgp_show_type_normal,
@@ -785,6 +788,14 @@ DECLARE_HOOK(bgp_route_update,
 	     (struct bgp *bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
 	      struct bgp_path_info *old_route, struct bgp_path_info *new_route),
 	     (bgp, afi, safi, bn, old_route, new_route));
+
+DECLARE_HOOK(bgp_adj_out_update,
+	     (struct update_subgroup *subgrp, struct bgp_dest *dest,
+	      struct bgp_path_info *path, struct attr *attr,
+	      struct bgp_labels *labels, uint32_t addpath_tx_id,
+	      bool post_policy, bool withdraw),
+	     (subgrp, dest, path, attr, labels, addpath_tx_id, post_policy,
+	      withdraw));
 
 extern int bgp_pi_hash_cmp(const struct bgp_path_info *p1, const struct bgp_path_info *p2);
 extern uint32_t bgp_pi_hash_hashfn(const struct bgp_path_info *pi);
