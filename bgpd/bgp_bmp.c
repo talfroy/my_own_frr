@@ -81,6 +81,7 @@ DEFINE_QOBJ_TYPE(bmp_targets);
 #define BMP_PEER_FLAG_V (1 << 7)
 #define BMP_PEER_FLAG_L (1 << 6)
 #define BMP_PEER_FLAG_A (1 << 5)
+#define BMP_PEER_FLAG_O (1 << 4)
 
 static bool bmp_mon_needs_sync(uint8_t flags)
 {
@@ -92,7 +93,7 @@ static uint8_t bmp_route_monitor_flags(bool adj_rib_out, bool post_policy)
 	uint8_t flags = 0;
 
 	if (adj_rib_out)
-		SET_FLAG(flags, BMP_PEER_FLAG_A);
+		SET_FLAG(flags, BMP_PEER_FLAG_O);
 	if (post_policy)
 		SET_FLAG(flags, BMP_PEER_FLAG_L);
 
