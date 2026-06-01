@@ -3807,10 +3807,6 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 	advertise = bgp_check_advertise(bgp, dest, safi);
 
 	if (selected) {
-		bgp_adj_out_update(subgrp, dest, selected, selected->attr,
-				   selected->extra ? selected->extra->labels : NULL,
-				   addpath_tx_id, false, false);
-
 		if (subgroup_announce_check(dest, selected, subgrp, p, pattr,
 					    NULL)) {
 			/* Route is selected, if the route is already installed
@@ -3857,9 +3853,6 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 
 	/* If selected is NULL we must withdraw the path using addpath_tx_id */
 	else {
-		bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
-				   addpath_tx_id, false, true);
-
 		bgp_adj_out_unset_subgroup(dest, subgrp, addpath_tx_id);
 	}
 }
