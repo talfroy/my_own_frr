@@ -499,6 +499,9 @@ bool bgp_dump_attr(struct attr *attr, char *buf, size_t size)
 		struct bgp_nhc_tlv *tlv;
 		struct bgp_nhc *nhc = bgp_attr_get_nhc(attr);
 
+		if (!nhc)
+			return strlen(buf) > 1;
+
 		for (tlv = nhc->tlvs; tlv; tlv = tlv->next)
 			snprintfrr(buf + strlen(buf), size - strlen(buf),
 				   ", NHC TLV code %d length %d value %p", tlv->code, tlv->length,
