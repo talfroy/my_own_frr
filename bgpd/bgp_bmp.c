@@ -316,6 +316,26 @@ static void bmp_queue_entry_free(struct bmp_queue_entry *bqe)
 	XFREE(MTYPE_BMP_QUEUE, bqe);
 }
 
+static void bmp_adjout_key_init(struct bmp_queue_entry *bqeref, afi_t afi,
+				safi_t safi, struct bgp_dest *bn,
+				struct peer *peer, struct peer *from,
+				uint32_t addpath_tx_id, bool post_policy)
+{
+	memset(bqeref, 0, sizeof(*bqeref));
+	prefix_copy(&bqeref->p, bgp_dest_get_prefix(bn));
+	bqeref->peerid = peer->qobj_node.nid;
+	bqeref->source_peerid = from ? from->qobj_node.nid : 0;
+	bqeref->afi = afi;
+	bqeref->safi = safi;
+	bqeref->addpath_tx_id = addpath_tx_id;
+	bqeref->out_post_policy = post_policy;
+
+	if ((afi == AFI_L2VPN && safi == SAFI_EVPN && bn->pdest) ||
+	    safi == SAFI_MPLS_VPN)
+		prefix_copy(&bqeref->rd,
+			    (struct prefix_rd *)bgp_dest_get_prefix(bn->pdest));
+}
+
 static inline int bmp_get_peer_distinguisher(struct bgp *bgp, afi_t afi, uint8_t peer_type,
 					     uint64_t *result_ref)
 {
@@ -2068,6 +2088,64 @@ static void bmp_queue_entry_update_attr(struct bmp_queue_entry *bqe,
 		bqe->labels = bgp_labels_intern(labels);
 }
 
+static bool bmp_outpre_update(struct bmp_targets *bt,
+			      const struct bmp_queue_entry *bqeref,
+			      struct attr *attr, struct bgp_labels *labels,
+			      bool withdraw, bool have_sessions)
+{
+	struct bmp_queue_entry *bqe;
+	struct attr *new_attr = NULL;
+	struct bgp_labels *new_labels = NULL;
+
+	bqe = bmp_rbtree_find(&bt->outpreh, bqeref);
+
+	if (!have_sessions) {
+		if (bqe) {
+			bmp_rbtree_del(&bt->outpreh, bqe);
+			bmp_queue_entry_free(bqe);
+		}
+		return false;
+	}
+
+	if (withdraw) {
+		if (!bqe)
+			return false;
+
+		bmp_rbtree_del(&bt->outpreh, bqe);
+		bmp_queue_entry_free(bqe);
+		return true;
+	}
+
+	if (!attr)
+		return false;
+
+	new_attr = bgp_attr_intern(attr);
+	if (labels)
+		new_labels = bgp_labels_intern(labels);
+
+	if (bqe) {
+		if (bqe->attr == new_attr &&
+		    bgp_labels_cmp(bqe->labels, new_labels)) {
+			bgp_attr_unintern(&new_attr);
+			bgp_labels_unintern(&new_labels);
+			return false;
+		}
+
+		bmp_queue_entry_clear(bqe);
+		bqe->attr = new_attr;
+		bqe->labels = new_labels;
+		return true;
+	}
+
+	bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
+	memcpy(bqe, bqeref, sizeof(*bqe));
+	bqe->attr = new_attr;
+	bqe->labels = new_labels;
+	bmp_rbtree_add(&bt->outpreh, bqe);
+
+	return true;
+}
+
 static struct bmp_queue_entry *
 bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 		       struct bgp_dest *bn, struct peer *peer, struct peer *from,
@@ -2078,22 +2156,15 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	size_t refcount;
 
 	refcount = bmp_session_count(&bt->sessions);
-	if (refcount == 0)
+	bmp_adjout_key_init(&bqeref, afi, safi, bn, peer, from, addpath_tx_id,
+			    post_policy);
+
+	if (!post_policy &&
+	    !bmp_outpre_update(bt, &bqeref, attr, labels, !attr, refcount))
 		return NULL;
 
-	memset(&bqeref, 0, sizeof(bqeref));
-	prefix_copy(&bqeref.p, bgp_dest_get_prefix(bn));
-	bqeref.peerid = peer->qobj_node.nid;
-	bqeref.source_peerid = from ? from->qobj_node.nid : 0;
-	bqeref.afi = afi;
-	bqeref.safi = safi;
-	bqeref.addpath_tx_id = addpath_tx_id;
-	bqeref.out_post_policy = post_policy;
-
-	if ((afi == AFI_L2VPN && safi == SAFI_EVPN && bn->pdest) ||
-	    safi == SAFI_MPLS_VPN)
-		prefix_copy(&bqeref.rd,
-			    (struct prefix_rd *)bgp_dest_get_prefix(bn->pdest));
+	if (refcount == 0)
+		return NULL;
 
 	bqe = bmp_rbtree_find(&bt->outupdhash, &bqeref);
 	if (bqe) {
@@ -2688,6 +2759,7 @@ static struct bmp_targets *bmp_targets_get(struct bgp *bgp, const char *name)
 	bmp_qlist_init(&bt->locupdlist);
 	bmp_rbtree_init(&bt->outupdhash);
 	bmp_qlist_init(&bt->outupdlist);
+	bmp_rbtree_init(&bt->outpreh);
 	bmp_actives_init(&bt->actives);
 	bmp_listeners_init(&bt->listeners);
 	bmp_imported_bgps_init(&bt->imported_bgps);
@@ -2708,6 +2780,7 @@ static void bmp_targets_put(struct bmp_targets *bt)
 {
 	struct bmp *bmp;
 	struct bmp_active *ba;
+	struct bmp_queue_entry *bqe;
 	struct bmp_imported_bgp *bib;
 
 	event_cancel(&bt->t_stats);
@@ -2735,6 +2808,9 @@ static void bmp_targets_put(struct bmp_targets *bt)
 	bmp_qlist_fini(&bt->locupdlist);
 	bmp_rbtree_fini(&bt->outupdhash);
 	bmp_qlist_fini(&bt->outupdlist);
+	while ((bqe = bmp_rbtree_pop(&bt->outpreh)))
+		bmp_queue_entry_free(bqe);
+	bmp_rbtree_fini(&bt->outpreh);
 
 	XFREE(MTYPE_BMP_ACLNAME, bt->acl_name);
 	XFREE(MTYPE_BMP_ACLNAME, bt->acl6_name);

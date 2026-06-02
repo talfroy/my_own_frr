@@ -3781,6 +3781,7 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 	struct attr attr = { 0 }, *pattr = &attr;
 	struct bgp *bgp;
 	bool advertise;
+	bool withdraw = false;
 
 	p = bgp_dest_get_prefix(dest);
 	bgp = SUBGRP_INST(subgrp);
@@ -3805,15 +3806,23 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 	 * route
 	 */
 	advertise = bgp_check_advertise(bgp, dest, safi);
+	if (selected && advertise)
+		withdraw = bgp_check_withdrawal(bgp, dest, safi);
 
 	if (selected) {
+		if (advertise && !withdraw)
+			bgp_adj_out_update(
+				subgrp, dest, selected, selected->attr,
+				selected->extra ? selected->extra->labels : NULL,
+				addpath_tx_id, false, false);
+
 		if (subgroup_announce_check(dest, selected, subgrp, p, pattr,
 					    NULL)) {
 			/* Route is selected, if the route is already installed
 			 * in FIB, then it is advertised
 			 */
 			if (advertise) {
-				if (!bgp_check_withdrawal(bgp, dest, safi)) {
+				if (!withdraw) {
 					if (!bgp_adj_out_set_subgroup(dest,
 								      subgrp,
 								      pattr,
@@ -3840,7 +3849,8 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 						}
 					}
 				} else {
-					bgp_adj_out_unset_subgroup(dest, subgrp, addpath_tx_id);
+					bgp_adj_out_unset_subgroup(dest, subgrp,
+								   addpath_tx_id);
 					bgp_attr_flush(pattr);
 				}
 			} else
@@ -3853,6 +3863,9 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 
 	/* If selected is NULL we must withdraw the path using addpath_tx_id */
 	else {
+		bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
+				   addpath_tx_id, false, true);
+
 		bgp_adj_out_unset_subgroup(dest, subgrp, addpath_tx_id);
 	}
 }
