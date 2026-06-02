@@ -1221,7 +1221,8 @@ static struct stream *
 bmp_update_adjout(const struct prefix *p, struct prefix_rd *prd,
 		  struct peer *peer, struct peer *from, struct attr *attr,
 		  afi_t afi, safi_t safi, mpls_label_t *label,
-		  uint8_t num_labels, uint32_t addpath_tx_id)
+		  uint8_t num_labels, uint32_t addpath_tx_id,
+		  bool post_policy)
 {
 	struct bpacket_attr_vec_arr vecarr;
 	struct stream *s;
@@ -1244,7 +1245,7 @@ bmp_update_adjout(const struct prefix *p, struct prefix_rd *prd,
 					      NULL, afi, safi, from, NULL,
 					      label, num_labels, 0,
 					      addpath_capable, addpath_tx_id,
-					      NULL, NULL, false);
+					      NULL, NULL, !post_policy);
 
 	if (afi == AFI_IP && safi == SAFI_UNICAST &&
 	    !peer_cap_enhe(peer, afi, safi)) {
@@ -1385,7 +1386,8 @@ static void bmp_monitor_adjout(struct bmp *bmp, struct peer *peer,
 
 	if (attr)
 		msg = bmp_update_adjout(p, prd, peer, from, attr, afi, safi,
-					label, num_labels, addpath_tx_id);
+					label, num_labels, addpath_tx_id,
+					post_policy);
 	else
 		msg = bmp_withdraw(p, prd, afi, safi);
 
