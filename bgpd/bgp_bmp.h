@@ -254,6 +254,8 @@ struct bmp_targets {
 	struct bmp_rbtree_head outupdhash;
 	struct bmp_qlist_head outupdlist;
 
+	struct bmp_rbtree_head outpreh;
+
 	struct bmp_imported_bgps_head imported_bgps;
 
 	uint64_t cnt_accept, cnt_aclrefused;

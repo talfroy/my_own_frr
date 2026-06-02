@@ -660,8 +660,6 @@ bool bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 	else
 		adj->labels = NULL;
 
-	bgp_adj_out_update(subgrp, dest, path, path->attr, adj->labels,
-			   adj->addpath_tx_id, false, false);
 	bgp_adj_out_update(subgrp, dest, path, adv->baa->attr, adj->labels,
 			   adj->addpath_tx_id, true, false);
 
@@ -740,8 +738,6 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest, struct update_subgroup *s
 			adv->dest = dest;
 			adv->adj = adj;
 
-			bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
-					   adj->addpath_tx_id, false, true);
 			bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
 					   adj->addpath_tx_id, true, true);
 
