@@ -310,6 +310,19 @@ static void bmp_queue_entry_clear(struct bmp_queue_entry *bqe)
 	bgp_labels_unintern(&bqe->labels);
 }
 
+static struct attr *bmp_attr_ref(struct attr *attr)
+{
+	if (!attr)
+		return NULL;
+
+	if (attr->refcnt) {
+		attr->refcnt++;
+		return attr;
+	}
+
+	return bgp_attr_intern(attr);
+}
+
 static void bmp_queue_entry_free(struct bmp_queue_entry *bqe)
 {
 	bmp_queue_entry_clear(bqe);
@@ -2082,12 +2095,16 @@ static void bmp_queue_entry_update_attr(struct bmp_queue_entry *bqe,
 					struct attr *attr,
 					struct bgp_labels *labels)
 {
+	struct attr *new_attr;
+	struct bgp_labels *new_labels;
+
+	new_attr = bmp_attr_ref(attr);
+	new_labels = bgp_labels_intern(labels);
+
 	bmp_queue_entry_clear(bqe);
 
-	if (attr)
-		bqe->attr = bgp_attr_intern(attr);
-	if (labels)
-		bqe->labels = bgp_labels_intern(labels);
+	bqe->attr = new_attr;
+	bqe->labels = new_labels;
 }
 
 static bool bmp_outpre_update(struct bmp_targets *bt,
@@ -2121,7 +2138,7 @@ static bool bmp_outpre_update(struct bmp_targets *bt,
 	if (!attr)
 		return false;
 
-	new_attr = bgp_attr_intern(attr);
+	new_attr = bmp_attr_ref(attr);
 	if (labels)
 		new_labels = bgp_labels_intern(labels);
 
