@@ -74,6 +74,7 @@ struct bmp_queue_entry {
 	struct prefix_rd rd;
 	struct attr *attr;
 	struct bgp_labels *labels;
+	struct peer *source_peer;
 };
 
 /* This is for BMP Route Mirroring, which feeds fully raw BGP PDUs out to BMP

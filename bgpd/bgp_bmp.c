@@ -310,6 +310,14 @@ static void bmp_queue_entry_clear(struct bmp_queue_entry *bqe)
 	bgp_labels_unintern(&bqe->labels);
 }
 
+static void bmp_queue_entry_clear_source(struct bmp_queue_entry *bqe)
+{
+	if (bqe->source_peer) {
+		peer_unlock(bqe->source_peer);
+		bqe->source_peer = NULL;
+	}
+}
+
 static struct attr *bmp_attr_ref(struct attr *attr)
 {
 	if (!attr)
@@ -326,7 +334,19 @@ static struct attr *bmp_attr_ref(struct attr *attr)
 static void bmp_queue_entry_free(struct bmp_queue_entry *bqe)
 {
 	bmp_queue_entry_clear(bqe);
+	bmp_queue_entry_clear_source(bqe);
 	XFREE(MTYPE_BMP_QUEUE, bqe);
+}
+
+static void bmp_queue_entry_set_source(struct bmp_queue_entry *bqe,
+				       struct peer *from)
+{
+	if (bqe->source_peer == from)
+		return;
+
+	bmp_queue_entry_clear_source(bqe);
+	if (from)
+		bqe->source_peer = peer_lock(from);
 }
 
 static void bmp_adjout_key_init(struct bmp_queue_entry *bqeref, afi_t afi,
@@ -1880,8 +1900,7 @@ static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 	if (!peer_established(peer->connection))
 		goto out;
 
-	if (bqe->source_peerid)
-		from = QOBJ_GET_TYPESAFE(bqe->source_peerid, peer);
+	from = bqe->source_peer;
 
 	if (bqe->labels) {
 		num_labels = bqe->labels->num_labels;
@@ -2188,6 +2207,7 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	bqe = bmp_rbtree_find(&bt->outupdhash, &bqeref);
 	if (bqe) {
 		bqe->source_peerid = bqeref.source_peerid;
+		bmp_queue_entry_set_source(bqe, from);
 		bmp_queue_entry_update_attr(bqe, attr, labels);
 		if (bqe->refcount >= refcount)
 			return NULL;
@@ -2196,6 +2216,7 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	} else {
 		bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
 		memcpy(bqe, &bqeref, sizeof(*bqe));
+		bmp_queue_entry_set_source(bqe, from);
 		bmp_queue_entry_update_attr(bqe, attr, labels);
 
 		bmp_rbtree_add(&bt->outupdhash, bqe);
