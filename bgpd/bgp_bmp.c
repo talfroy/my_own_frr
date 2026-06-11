@@ -1274,7 +1274,8 @@ bmp_update_adjout(const struct prefix *p, struct prefix_rd *prd,
 
 	addpath_capable = bgp_addpath_encode_tx(peer, afi, safi);
 	total_attr_len = bgp_packet_attribute(NULL, peer, s, attr, &vecarr,
-					      NULL, afi, safi, from, NULL,
+					      NULL, afi, safi,
+					      post_policy ? from : peer, NULL,
 					      label, num_labels, 0,
 					      addpath_capable, addpath_tx_id,
 					      NULL, NULL, !post_policy);
@@ -1899,7 +1900,7 @@ static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 	if (!peer_established(peer->connection))
 		goto out;
 
-	from = bqe->source_peer;
+	from = bqe->out_post_policy ? bqe->source_peer : peer;
 
 	if (bqe->labels) {
 		num_labels = bqe->labels->num_labels;
@@ -2206,7 +2207,7 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	bqe = bmp_rbtree_find(&bt->outupdhash, &bqeref);
 	if (bqe) {
 		bqe->source_peerid = bqeref.source_peerid;
-		bmp_queue_entry_set_source(bqe, from);
+		bmp_queue_entry_set_source(bqe, post_policy ? from : NULL);
 		bmp_queue_entry_update_attr(bqe, attr, labels);
 		if (bqe->refcount >= refcount)
 			return NULL;
@@ -2215,7 +2216,7 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	} else {
 		bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
 		memcpy(bqe, &bqeref, sizeof(*bqe));
-		bmp_queue_entry_set_source(bqe, from);
+		bmp_queue_entry_set_source(bqe, post_policy ? from : NULL);
 		bmp_queue_entry_update_attr(bqe, attr, labels);
 
 		bmp_rbtree_add(&bt->outupdhash, bqe);
