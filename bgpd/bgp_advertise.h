@@ -77,6 +77,16 @@ struct bgp_adj_out {
 
 	/* Advertisement information.  */
 	struct bgp_advertise *adv;
+
+	/* Pending BMP Adj-RIB-Out pre-policy snapshot.  This is held until the
+	 * post-policy outcome is known so BMP can emit PRE immediately before
+	 * its corresponding POST event.
+	 */
+	bool bmp_pre_pending;
+	bool bmp_pre_withdraw;
+	struct attr *bmp_pre_attr;
+	struct bgp_labels *bmp_pre_labels;
+	struct bgp_path_info *bmp_pre_path;
 };
 
 RB_HEAD(bgp_adj_out_rb, bgp_adj_out);

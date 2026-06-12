@@ -78,9 +78,22 @@ static inline struct bgp_adj_out *adj_lookup(struct bgp_dest *dest,
 	return RB_FIND(bgp_adj_out_rb, &dest->adj_out, &lookup);
 }
 
+static void bgp_adj_out_clear_bmp_pre(struct bgp_adj_out *adj)
+{
+	if (adj->bmp_pre_attr)
+		bgp_attr_unintern(&adj->bmp_pre_attr);
+	bgp_labels_unintern(&adj->bmp_pre_labels);
+	if (adj->bmp_pre_path)
+		bgp_path_info_unlock(adj->bmp_pre_path);
+	adj->bmp_pre_path = NULL;
+	adj->bmp_pre_pending = false;
+	adj->bmp_pre_withdraw = false;
+}
+
 static void adj_free(struct bgp_adj_out *adj)
 {
 	bgp_labels_unintern(&adj->labels);
+	bgp_adj_out_clear_bmp_pre(adj);
 
 	TAILQ_REMOVE(&(adj->subgroup->adjq), adj, subgrp_adj_train);
 	SUBGRP_DECR_STAT(adj->subgroup, adj_count);
@@ -89,6 +102,43 @@ static void adj_free(struct bgp_adj_out *adj)
 	bgp_dest_unlock_node(adj->dest);
 
 	XFREE(MTYPE_BGP_ADJ_OUT, adj);
+}
+
+bool bgp_adj_out_set_bmp_pre(struct bgp_dest *dest,
+			     struct update_subgroup *subgrp,
+			     struct bgp_path_info *path, struct attr *attr,
+			     struct bgp_labels *labels,
+			     uint32_t addpath_tx_id, bool withdraw)
+{
+	struct bgp_adj_out *adj;
+
+	adj = adj_lookup(dest, subgrp, addpath_tx_id);
+	if (!adj)
+		return false;
+
+	bgp_adj_out_clear_bmp_pre(adj);
+
+	adj->bmp_pre_pending = true;
+	adj->bmp_pre_withdraw = withdraw;
+	if (path)
+		adj->bmp_pre_path = bgp_path_info_lock(path);
+	if (attr)
+		adj->bmp_pre_attr = bgp_attr_intern(attr);
+	if (labels)
+		adj->bmp_pre_labels = bgp_labels_intern(labels);
+
+	return true;
+}
+
+void bgp_adj_out_send_bmp_pre(struct bgp_adj_out *adj)
+{
+	if (!adj->bmp_pre_pending)
+		return;
+
+	bgp_adj_out_update(adj->subgroup, adj->dest, adj->bmp_pre_path,
+			   adj->bmp_pre_attr, adj->bmp_pre_labels,
+			   adj->addpath_tx_id, false, adj->bmp_pre_withdraw);
+	bgp_adj_out_clear_bmp_pre(adj);
 }
 
 static void
@@ -725,8 +775,10 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest, struct update_subgroup *s
 		 * the default route at the peer.
 		 */
 		if (CHECK_FLAG(subgrp->sflags, SUBGRP_STATUS_DEFAULT_ORIGINATE)
-		    && is_default_prefix(bgp_dest_get_prefix(dest)))
+		    && is_default_prefix(bgp_dest_get_prefix(dest))) {
+			bgp_adj_out_send_bmp_pre(adj);
 			return;
+		}
 
 		if (adj->attr) {
 			/* We need advertisement structure.  */
@@ -757,6 +809,8 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest, struct update_subgroup *s
 					   peer->host, dest, afi2str(afi), safi2str(safi));
 			}
 		} else {
+			bgp_adj_out_send_bmp_pre(adj);
+
 			/* Free allocated information.  */
 			adj_free(adj);
 		}

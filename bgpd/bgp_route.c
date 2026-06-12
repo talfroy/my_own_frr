@@ -3810,12 +3810,6 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 		withdraw = bgp_check_withdrawal(bgp, dest, safi);
 
 	if (selected) {
-		if (advertise && !withdraw)
-			bgp_adj_out_update(
-				subgrp, dest, selected, selected->attr,
-				selected->extra ? selected->extra->labels : NULL,
-				addpath_tx_id, false, false);
-
 		if (subgroup_announce_check(dest, selected, subgrp, p, pattr,
 					    NULL)) {
 			/* Route is selected, if the route is already installed
@@ -3828,6 +3822,15 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 								      pattr,
 								      selected))
 						bgp_attr_flush(pattr);
+					else
+						bgp_adj_out_set_bmp_pre(
+							dest, subgrp, selected,
+							selected->attr,
+							selected->extra
+								? selected->extra
+									  ->labels
+								: NULL,
+							addpath_tx_id, false);
 
 					/* Remove paths from Adj-RIB-Out if it's not a best (selected) path.
 					 * Why should we keep Adj-RIB-Out with stale paths?
@@ -3849,6 +3852,10 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 						}
 					}
 				} else {
+					bgp_adj_out_set_bmp_pre(dest, subgrp,
+								NULL, NULL, NULL,
+								addpath_tx_id,
+								true);
 					bgp_adj_out_unset_subgroup(dest, subgrp,
 								   addpath_tx_id);
 					bgp_attr_flush(pattr);
@@ -3856,6 +3863,17 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 			} else
 				bgp_attr_flush(pattr);
 		} else {
+			if (advertise && !withdraw &&
+			    !bgp_adj_out_set_bmp_pre(
+				    dest, subgrp, selected, selected->attr,
+				    selected->extra ? selected->extra->labels
+						    : NULL,
+				    addpath_tx_id, false))
+				bgp_adj_out_update(
+					subgrp, dest, selected, selected->attr,
+					selected->extra ? selected->extra->labels
+							: NULL,
+					addpath_tx_id, false, false);
 			bgp_adj_out_unset_subgroup(dest, subgrp, addpath_tx_id);
 			bgp_attr_flush(pattr);
 		}
@@ -3863,9 +3881,8 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 
 	/* If selected is NULL we must withdraw the path using addpath_tx_id */
 	else {
-		bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
-				   addpath_tx_id, false, true);
-
+		bgp_adj_out_set_bmp_pre(dest, subgrp, NULL, NULL, NULL,
+					addpath_tx_id, true);
 		bgp_adj_out_unset_subgroup(dest, subgrp, addpath_tx_id);
 	}
 }
