@@ -920,6 +920,9 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 				   pfx_buf);
 		}
 
+		bgp_adj_out_update(subgrp, dest, path, adv->baa->attr,
+				   adj->labels, addpath_tx_id, true, false);
+
 		/* Synchnorize attribute.  */
 		if (adj->attr)
 			bgp_attr_unintern(&adj->attr);
@@ -1072,6 +1075,9 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 
 			num_pfx++;
 
+			bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
+					   addpath_tx_id, true, true);
+
 			if (bgp_debug_update(NULL, NULL, subgrp->update_group, 0))
 				zlog_debug("u%" PRIu64 ":s%" PRIu64
 					   " send UPDATE BGP-LS NLRI -- unreachable",
@@ -1137,6 +1143,9 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 		}
 
 		num_pfx++;
+
+		bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
+				   addpath_tx_id, true, true);
 
 		if (bgp_debug_update(NULL, dest_p, subgrp->update_group, 0)) {
 			char pfx_buf[BGP_PRD_PATH_STRLEN];
