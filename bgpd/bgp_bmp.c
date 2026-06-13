@@ -1775,19 +1775,9 @@ static inline struct bmp_queue_entry *bmp_pull_locrib(struct bmp *bmp)
 
 static inline struct bmp_queue_entry *bmp_pull_adjout(struct bmp *bmp)
 {
-	struct bmp_queue_entry *bqe;
-
-	bqe = bmp->out_queuepos;
-	if (!bqe)
-		return NULL;
-
-	bmp->out_queuepos = bmp_qlist_next(&bmp->targets->outupdlist, bqe);
-
-	bqe->refcount--;
-	if (!bqe->refcount) {
-		bmp_qlist_del(&bmp->targets->outupdlist, bqe);
-	}
-	return bqe;
+	return bmp_pull_from_queue(&bmp->targets->outupdlist,
+				   &bmp->targets->outupdhash,
+				   &bmp->out_queuepos);
 }
 
 /* TODO BMP_MON_LOCRIB find a way to merge properly this function with
@@ -2136,6 +2126,64 @@ static void bmp_queue_entry_update_attr(struct bmp_queue_entry *bqe,
 	bqe->labels = new_labels;
 }
 
+static bool bmp_outpre_update(struct bmp_targets *bt,
+			      const struct bmp_queue_entry *bqeref,
+			      struct attr *attr, struct bgp_labels *labels,
+			      bool withdraw, bool have_sessions)
+{
+	struct bmp_queue_entry *bqe;
+	struct attr *new_attr = NULL;
+	struct bgp_labels *new_labels = NULL;
+
+	bqe = bmp_rbtree_find(&bt->outpreh, bqeref);
+
+	if (!have_sessions) {
+		if (bqe) {
+			bmp_rbtree_del(&bt->outpreh, bqe);
+			bmp_queue_entry_free(bqe);
+		}
+		return false;
+	}
+
+	if (withdraw) {
+		if (!bqe)
+			return false;
+
+		bmp_rbtree_del(&bt->outpreh, bqe);
+		bmp_queue_entry_free(bqe);
+		return true;
+	}
+
+	if (!attr)
+		return false;
+
+	new_attr = bmp_attr_ref(attr);
+	if (labels)
+		new_labels = bgp_labels_intern(labels);
+
+	if (bqe) {
+		if (bqe->attr == new_attr &&
+		    bgp_labels_cmp(bqe->labels, new_labels)) {
+			bgp_attr_unintern(&new_attr);
+			bgp_labels_unintern(&new_labels);
+			return false;
+		}
+
+		bmp_queue_entry_clear(bqe);
+		bqe->attr = new_attr;
+		bqe->labels = new_labels;
+		return true;
+	}
+
+	bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
+	memcpy(bqe, bqeref, sizeof(*bqe));
+	bqe->attr = new_attr;
+	bqe->labels = new_labels;
+	bmp_rbtree_add(&bt->outpreh, bqe);
+
+	return true;
+}
+
 static struct bmp_queue_entry *
 bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 		       struct bgp_dest *bn, struct peer *peer, struct peer *from,
@@ -2149,17 +2197,30 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	bmp_adjout_key_init(&bqeref, afi, safi, bn, peer, from, addpath_tx_id,
 			    post_policy);
 
+	if (!post_policy &&
+	    !bmp_outpre_update(bt, &bqeref, attr, labels, !attr, refcount))
+		return NULL;
+
 	if (refcount == 0)
 		return NULL;
 
-	/* Adj-RIB-Out BMP is emitted as a decision/event stream.  PRE and POST
-	 * entries are queued consecutively, so neither side may coalesce newer
-	 * events over older queued ones for the same prefix.
-	 */
-	bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
-	memcpy(bqe, &bqeref, sizeof(*bqe));
-	bmp_queue_entry_set_source(bqe, post_policy ? from : NULL);
-	bmp_queue_entry_update_attr(bqe, attr, labels);
+	bqe = bmp_rbtree_find(&bt->outupdhash, &bqeref);
+	if (bqe) {
+		bqe->source_peerid = bqeref.source_peerid;
+		bmp_queue_entry_set_source(bqe, post_policy ? from : NULL);
+		bmp_queue_entry_update_attr(bqe, attr, labels);
+		if (bqe->refcount >= refcount)
+			return NULL;
+
+		bmp_qlist_del(&bt->outupdlist, bqe);
+	} else {
+		bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
+		memcpy(bqe, &bqeref, sizeof(*bqe));
+		bmp_queue_entry_set_source(bqe, post_policy ? from : NULL);
+		bmp_queue_entry_update_attr(bqe, attr, labels);
+
+		bmp_rbtree_add(&bt->outupdhash, bqe);
+	}
 
 	bqe->refcount = refcount;
 	bmp_qlist_add_tail(&bt->outupdlist, bqe);
@@ -2532,7 +2593,9 @@ static void bmp_close(struct bmp *bmp)
 	while ((bqe = bmp_pull_locrib(bmp)))
 		if (!bqe->refcount)
 			bmp_queue_entry_free(bqe);
-	while ((bqe = bmp_pull_adjout(bmp)))
+	while ((bqe = bmp_pull_from_queue(&bmp->targets->outupdlist,
+					  &bmp->targets->outupdhash,
+					  &bmp->out_queuepos)))
 		if (!bqe->refcount)
 			bmp_queue_entry_free(bqe);
 
