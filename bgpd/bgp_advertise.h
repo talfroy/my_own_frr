@@ -86,7 +86,6 @@ struct bgp_adj_out {
 	bool bmp_pre_withdraw;
 	struct attr *bmp_pre_attr;
 	struct bgp_labels *bmp_pre_labels;
-	struct bgp_path_info *bmp_pre_path;
 };
 
 RB_HEAD(bgp_adj_out_rb, bgp_adj_out);

@@ -83,9 +83,6 @@ static void bgp_adj_out_clear_bmp_pre(struct bgp_adj_out *adj)
 	if (adj->bmp_pre_attr)
 		bgp_attr_unintern(&adj->bmp_pre_attr);
 	bgp_labels_unintern(&adj->bmp_pre_labels);
-	if (adj->bmp_pre_path)
-		bgp_path_info_unlock(adj->bmp_pre_path);
-	adj->bmp_pre_path = NULL;
 	adj->bmp_pre_pending = false;
 	adj->bmp_pre_withdraw = false;
 }
@@ -106,8 +103,7 @@ static void adj_free(struct bgp_adj_out *adj)
 
 bool bgp_adj_out_set_bmp_pre(struct bgp_dest *dest,
 			     struct update_subgroup *subgrp,
-			     struct bgp_path_info *path, struct attr *attr,
-			     struct bgp_labels *labels,
+			     struct attr *attr, struct bgp_labels *labels,
 			     uint32_t addpath_tx_id, bool withdraw)
 {
 	struct bgp_adj_out *adj;
@@ -120,8 +116,6 @@ bool bgp_adj_out_set_bmp_pre(struct bgp_dest *dest,
 
 	adj->bmp_pre_pending = true;
 	adj->bmp_pre_withdraw = withdraw;
-	if (path)
-		adj->bmp_pre_path = bgp_path_info_lock(path);
 	if (attr)
 		adj->bmp_pre_attr = bgp_attr_intern(attr);
 	if (labels)
@@ -135,9 +129,9 @@ void bgp_adj_out_send_bmp_pre(struct bgp_adj_out *adj)
 	if (!adj->bmp_pre_pending)
 		return;
 
-	bgp_adj_out_update(adj->subgroup, adj->dest, adj->bmp_pre_path,
-			   adj->bmp_pre_attr, adj->bmp_pre_labels,
-			   adj->addpath_tx_id, false, adj->bmp_pre_withdraw);
+	bgp_adj_out_update(adj->subgroup, adj->dest, NULL, adj->bmp_pre_attr,
+			   adj->bmp_pre_labels, adj->addpath_tx_id, false,
+			   adj->bmp_pre_withdraw);
 	bgp_adj_out_clear_bmp_pre(adj);
 }
 

@@ -3824,8 +3824,7 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 						bgp_attr_flush(pattr);
 					else
 						bgp_adj_out_set_bmp_pre(
-							dest, subgrp, selected,
-							selected->attr,
+							dest, subgrp, selected->attr,
 							selected->extra
 								? selected->extra
 									  ->labels
@@ -3853,9 +3852,8 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 					}
 				} else {
 					bgp_adj_out_set_bmp_pre(dest, subgrp,
-								NULL, NULL, NULL,
-								addpath_tx_id,
-								true);
+								NULL, NULL,
+								addpath_tx_id, true);
 					bgp_adj_out_unset_subgroup(dest, subgrp,
 								   addpath_tx_id);
 					bgp_attr_flush(pattr);
@@ -3865,7 +3863,7 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 		} else {
 			if (advertise && !withdraw &&
 			    !bgp_adj_out_set_bmp_pre(
-				    dest, subgrp, selected, selected->attr,
+				    dest, subgrp, selected->attr,
 				    selected->extra ? selected->extra->labels
 						    : NULL,
 				    addpath_tx_id, false))
@@ -3881,8 +3879,8 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 
 	/* If selected is NULL we must withdraw the path using addpath_tx_id */
 	else {
-		bgp_adj_out_set_bmp_pre(dest, subgrp, NULL, NULL, NULL,
-					addpath_tx_id, true);
+		bgp_adj_out_set_bmp_pre(dest, subgrp, NULL, NULL, addpath_tx_id,
+					true);
 		bgp_adj_out_unset_subgroup(dest, subgrp, addpath_tx_id);
 	}
 }

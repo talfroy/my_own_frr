@@ -446,7 +446,6 @@ extern void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 				       uint32_t addpath_tx_id);
 extern bool bgp_adj_out_set_bmp_pre(struct bgp_dest *dest,
 				    struct update_subgroup *subgrp,
-				    struct bgp_path_info *path,
 				    struct attr *attr,
 				    struct bgp_labels *labels,
 				    uint32_t addpath_tx_id, bool withdraw);
