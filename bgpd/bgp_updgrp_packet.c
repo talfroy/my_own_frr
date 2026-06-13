@@ -920,6 +920,7 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 				   pfx_buf);
 		}
 
+		bgp_adj_out_send_bmp_pre(adj);
 		bgp_adj_out_update(subgrp, dest, path, adv->baa->attr,
 				   adj->labels, addpath_tx_id, true, false);
 
@@ -1075,6 +1076,7 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 
 			num_pfx++;
 
+			bgp_adj_out_send_bmp_pre(adj);
 			bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
 					   addpath_tx_id, true, true);
 
@@ -1144,6 +1146,7 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 
 		num_pfx++;
 
+		bgp_adj_out_send_bmp_pre(adj);
 		bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
 				   addpath_tx_id, true, true);
 
