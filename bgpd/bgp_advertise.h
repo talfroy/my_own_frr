@@ -36,6 +36,12 @@ struct bgp_advertise {
 
 	/* BGP info.  */
 	struct bgp_path_info *pathi;
+
+	/* BMP Adj-RIB-Out pre-policy snapshot paired with this queued
+	 * advertisement/withdraw.
+	 */
+	bool bmp_pre_pending;
+	bool bmp_pre_withdraw;
 };
 
 DECLARE_DLIST(bgp_advertise_attr_fifo, struct bgp_advertise, item);
@@ -78,14 +84,6 @@ struct bgp_adj_out {
 	/* Advertisement information.  */
 	struct bgp_advertise *adv;
 
-	/* Pending BMP Adj-RIB-Out pre-policy snapshot.  This is held until the
-	 * post-policy outcome is known so BMP can emit PRE immediately before
-	 * its corresponding POST event.
-	 */
-	bool bmp_pre_pending;
-	bool bmp_pre_withdraw;
-	struct attr *bmp_pre_attr;
-	struct bgp_labels *bmp_pre_labels;
 };
 
 RB_HEAD(bgp_adj_out_rb, bgp_adj_out);

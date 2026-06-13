@@ -78,19 +78,15 @@ static inline struct bgp_adj_out *adj_lookup(struct bgp_dest *dest,
 	return RB_FIND(bgp_adj_out_rb, &dest->adj_out, &lookup);
 }
 
-static void bgp_adj_out_clear_bmp_pre(struct bgp_adj_out *adj)
+static void bgp_advertise_clear_bmp_pre(struct bgp_advertise *adv)
 {
-	if (adj->bmp_pre_attr)
-		bgp_attr_unintern(&adj->bmp_pre_attr);
-	bgp_labels_unintern(&adj->bmp_pre_labels);
-	adj->bmp_pre_pending = false;
-	adj->bmp_pre_withdraw = false;
+	adv->bmp_pre_pending = false;
+	adv->bmp_pre_withdraw = false;
 }
 
 static void adj_free(struct bgp_adj_out *adj)
 {
 	bgp_labels_unintern(&adj->labels);
-	bgp_adj_out_clear_bmp_pre(adj);
 
 	TAILQ_REMOVE(&(adj->subgroup->adjq), adj, subgrp_adj_train);
 	SUBGRP_DECR_STAT(adj->subgroup, adj_count);
@@ -101,6 +97,17 @@ static void adj_free(struct bgp_adj_out *adj)
 	XFREE(MTYPE_BGP_ADJ_OUT, adj);
 }
 
+void bgp_advertise_set_bmp_pre(struct bgp_advertise *adv,
+			       struct bgp_path_info *path, bool withdraw)
+{
+	bgp_advertise_clear_bmp_pre(adv);
+
+	adv->bmp_pre_pending = true;
+	adv->bmp_pre_withdraw = withdraw;
+	if (path && !adv->pathi)
+		adv->pathi = bgp_path_info_lock(path);
+}
+
 bool bgp_adj_out_set_bmp_pre(struct bgp_dest *dest,
 			     struct update_subgroup *subgrp,
 			     struct attr *attr, struct bgp_labels *labels,
@@ -109,30 +116,27 @@ bool bgp_adj_out_set_bmp_pre(struct bgp_dest *dest,
 	struct bgp_adj_out *adj;
 
 	adj = adj_lookup(dest, subgrp, addpath_tx_id);
-	if (!adj)
+	if (!adj || !adj->adv)
 		return false;
 
-	bgp_adj_out_clear_bmp_pre(adj);
-
-	adj->bmp_pre_pending = true;
-	adj->bmp_pre_withdraw = withdraw;
-	if (attr)
-		adj->bmp_pre_attr = bgp_attr_intern(attr);
-	if (labels)
-		adj->bmp_pre_labels = bgp_labels_intern(labels);
-
+	bgp_advertise_set_bmp_pre(adj->adv, NULL, withdraw);
 	return true;
 }
 
-void bgp_adj_out_send_bmp_pre(struct bgp_adj_out *adj)
+void bgp_advertise_send_bmp_pre(struct update_subgroup *subgrp,
+				struct bgp_advertise *adv)
 {
-	if (!adj->bmp_pre_pending)
+	struct bgp_path_info *path = adv->bmp_pre_withdraw ? NULL : adv->pathi;
+	struct attr *attr = path ? path->attr : NULL;
+	struct bgp_labels *labels = path && path->extra ? path->extra->labels : NULL;
+
+	if (!adv->bmp_pre_pending)
 		return;
 
-	bgp_adj_out_update(adj->subgroup, adj->dest, NULL, adj->bmp_pre_attr,
-			   adj->bmp_pre_labels, adj->addpath_tx_id, false,
-			   adj->bmp_pre_withdraw);
-	bgp_adj_out_clear_bmp_pre(adj);
+	bgp_adj_out_update(subgrp, adv->dest, path, attr, labels,
+			   adv->adj->addpath_tx_id, false,
+			   adv->bmp_pre_withdraw);
+	bgp_advertise_clear_bmp_pre(adv);
 }
 
 static void
@@ -744,8 +748,11 @@ bool bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 	return true;
 }
 
-void bgp_adj_out_unset_subgroup(struct bgp_dest *dest, struct update_subgroup *subgrp,
-				uint32_t addpath_tx_id)
+bool bgp_adj_out_unset_subgroup_with_bmp_pre(struct bgp_dest *dest,
+					     struct update_subgroup *subgrp,
+					     uint32_t addpath_tx_id,
+					     struct bgp_path_info *pre_path,
+					     bool pre_withdraw)
 {
 	struct bgp_adj_out *adj;
 	struct bgp_advertise *adv;
@@ -755,7 +762,7 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest, struct update_subgroup *s
 	struct peer_af *paf;
 
 	if (DISABLE_BGP_ANNOUNCE)
-		return;
+		return false;
 
 	/* Lookup existing adjacency */
 	adj = adj_lookup(dest, subgrp, addpath_tx_id);
@@ -770,8 +777,14 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest, struct update_subgroup *s
 		 */
 		if (CHECK_FLAG(subgrp->sflags, SUBGRP_STATUS_DEFAULT_ORIGINATE)
 		    && is_default_prefix(bgp_dest_get_prefix(dest))) {
-			bgp_adj_out_send_bmp_pre(adj);
-			return;
+			bgp_adj_out_update(
+				subgrp, dest, pre_withdraw ? NULL : pre_path,
+				pre_withdraw || !pre_path ? NULL : pre_path->attr,
+				pre_withdraw || !pre_path || !pre_path->extra
+					? NULL
+					: pre_path->extra->labels,
+				addpath_tx_id, false, pre_withdraw);
+			return true;
 		}
 
 		if (adj->attr) {
@@ -780,6 +793,8 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest, struct update_subgroup *s
 			adv = adj->adv;
 			adv->dest = dest;
 			adv->adj = adj;
+
+			bgp_advertise_set_bmp_pre(adv, pre_path, pre_withdraw);
 
 			/*
 			 * If the update withdraw list is empty, trigger the MRAI
@@ -803,16 +818,34 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest, struct update_subgroup *s
 					   peer->host, dest, afi2str(afi), safi2str(safi));
 			}
 		} else {
-			bgp_adj_out_send_bmp_pre(adj);
+			bgp_adj_out_update(
+				subgrp, dest, pre_withdraw ? NULL : pre_path,
+				pre_withdraw || !pre_path ? NULL : pre_path->attr,
+				pre_withdraw || !pre_path || !pre_path->extra
+					? NULL
+					: pre_path->extra->labels,
+				addpath_tx_id, false, pre_withdraw);
 
 			/* Free allocated information.  */
 			adj_free(adj);
 		}
 		if (!CHECK_FLAG(subgrp->sflags, SUBGRP_STATUS_TABLE_REPARSING))
 			subgrp->pscount--;
+
+		subgrp->version = MAX(subgrp->version, dest->version);
+		return true;
 	}
 
 	subgrp->version = MAX(subgrp->version, dest->version);
+	return false;
+}
+
+void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
+				struct update_subgroup *subgrp,
+				uint32_t addpath_tx_id)
+{
+	bgp_adj_out_unset_subgroup_with_bmp_pre(dest, subgrp, addpath_tx_id,
+						NULL, true);
 }
 
 void bgp_adj_out_remove_subgroup(struct bgp_dest *dest, struct bgp_adj_out *adj,

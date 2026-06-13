@@ -3851,37 +3851,30 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 						}
 					}
 				} else {
-					bgp_adj_out_set_bmp_pre(dest, subgrp,
-								NULL, NULL,
-								addpath_tx_id, true);
-					bgp_adj_out_unset_subgroup(dest, subgrp,
-								   addpath_tx_id);
+					bgp_adj_out_unset_subgroup_with_bmp_pre(
+						dest, subgrp, addpath_tx_id, NULL,
+						true);
 					bgp_attr_flush(pattr);
 				}
 			} else
 				bgp_attr_flush(pattr);
 		} else {
 			if (advertise && !withdraw &&
-			    !bgp_adj_out_set_bmp_pre(
-				    dest, subgrp, selected->attr,
-				    selected->extra ? selected->extra->labels
-						    : NULL,
-				    addpath_tx_id, false))
+			    !bgp_adj_out_unset_subgroup_with_bmp_pre(
+				    dest, subgrp, addpath_tx_id, selected, false))
 				bgp_adj_out_update(
 					subgrp, dest, selected, selected->attr,
 					selected->extra ? selected->extra->labels
 							: NULL,
 					addpath_tx_id, false, false);
-			bgp_adj_out_unset_subgroup(dest, subgrp, addpath_tx_id);
 			bgp_attr_flush(pattr);
 		}
 	}
 
 	/* If selected is NULL we must withdraw the path using addpath_tx_id */
 	else {
-		bgp_adj_out_set_bmp_pre(dest, subgrp, NULL, NULL, addpath_tx_id,
-					true);
-		bgp_adj_out_unset_subgroup(dest, subgrp, addpath_tx_id);
+		bgp_adj_out_unset_subgroup_with_bmp_pre(
+			dest, subgrp, addpath_tx_id, NULL, true);
 	}
 }
 

@@ -444,12 +444,20 @@ extern bool bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 extern void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 				       struct update_subgroup *subgrp,
 				       uint32_t addpath_tx_id);
+extern bool bgp_adj_out_unset_subgroup_with_bmp_pre(
+	struct bgp_dest *dest, struct update_subgroup *subgrp,
+	uint32_t addpath_tx_id, struct bgp_path_info *pre_path,
+	bool pre_withdraw);
 extern bool bgp_adj_out_set_bmp_pre(struct bgp_dest *dest,
 				    struct update_subgroup *subgrp,
 				    struct attr *attr,
 				    struct bgp_labels *labels,
 				    uint32_t addpath_tx_id, bool withdraw);
-extern void bgp_adj_out_send_bmp_pre(struct bgp_adj_out *adj);
+extern void bgp_advertise_set_bmp_pre(struct bgp_advertise *adv,
+				      struct bgp_path_info *path,
+				      bool withdraw);
+extern void bgp_advertise_send_bmp_pre(struct update_subgroup *subgrp,
+				       struct bgp_advertise *adv);
 void subgroup_announce_table(struct update_subgroup *subgrp,
 			     struct bgp_table *table);
 extern void subgroup_trigger_write(struct update_subgroup *subgrp);
