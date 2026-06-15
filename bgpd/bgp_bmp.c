@@ -1775,9 +1775,21 @@ static inline struct bmp_queue_entry *bmp_pull_locrib(struct bmp *bmp)
 
 static inline struct bmp_queue_entry *bmp_pull_adjout(struct bmp *bmp)
 {
-	return bmp_pull_from_queue(&bmp->targets->outupdlist,
-				   &bmp->targets->outupdhash,
-				   &bmp->out_queuepos);
+	struct bmp_queue_entry *bqe;
+
+	bqe = bmp->out_queuepos;
+	if (!bqe)
+		return NULL;
+
+	bmp->out_queuepos = bmp_qlist_next(&bmp->targets->outupdlist, bqe);
+
+	bqe->refcount--;
+	if (!bqe->refcount) {
+		if (!bqe->out_post_policy)
+			bmp_rbtree_del(&bmp->targets->outupdhash, bqe);
+		bmp_qlist_del(&bmp->targets->outupdlist, bqe);
+	}
+	return bqe;
 }
 
 /* TODO BMP_MON_LOCRIB find a way to merge properly this function with
@@ -2204,10 +2216,20 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	if (refcount == 0)
 		return NULL;
 
+	if (post_policy) {
+		bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
+		memcpy(bqe, &bqeref, sizeof(*bqe));
+		bmp_queue_entry_set_source(bqe, from);
+		bmp_queue_entry_update_attr(bqe, attr, labels);
+		bqe->refcount = refcount;
+		bmp_qlist_add_tail(&bt->outupdlist, bqe);
+		return bqe;
+	}
+
 	bqe = bmp_rbtree_find(&bt->outupdhash, &bqeref);
 	if (bqe) {
 		bqe->source_peerid = bqeref.source_peerid;
-		bmp_queue_entry_set_source(bqe, post_policy ? from : NULL);
+		bmp_queue_entry_set_source(bqe, NULL);
 		bmp_queue_entry_update_attr(bqe, attr, labels);
 		if (bqe->refcount >= refcount)
 			return NULL;
@@ -2216,7 +2238,7 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	} else {
 		bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
 		memcpy(bqe, &bqeref, sizeof(*bqe));
-		bmp_queue_entry_set_source(bqe, post_policy ? from : NULL);
+		bmp_queue_entry_set_source(bqe, NULL);
 		bmp_queue_entry_update_attr(bqe, attr, labels);
 
 		bmp_rbtree_add(&bt->outupdhash, bqe);
@@ -2593,9 +2615,7 @@ static void bmp_close(struct bmp *bmp)
 	while ((bqe = bmp_pull_locrib(bmp)))
 		if (!bqe->refcount)
 			bmp_queue_entry_free(bqe);
-	while ((bqe = bmp_pull_from_queue(&bmp->targets->outupdlist,
-					  &bmp->targets->outupdhash,
-					  &bmp->out_queuepos)))
+	while ((bqe = bmp_pull_adjout(bmp)))
 		if (!bqe->refcount)
 			bmp_queue_entry_free(bqe);
 

@@ -920,6 +920,20 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 				   pfx_buf);
 		}
 
+		if (label_pnt && num_labels) {
+			struct bgp_labels bmp_labels = {};
+
+			memcpy(bmp_labels.label, label_pnt,
+			       num_labels * sizeof(*label_pnt));
+			bmp_labels.num_labels = num_labels;
+			bgp_adj_out_update(subgrp, dest, path, adv->baa->attr,
+					   &bmp_labels, addpath_tx_id, true,
+					   false);
+		} else {
+			bgp_adj_out_update(subgrp, dest, path, adv->baa->attr,
+					   NULL, addpath_tx_id, true, false);
+		}
+
 		/* Synchnorize attribute.  */
 		if (adj->attr)
 			bgp_attr_unintern(&adj->attr);
@@ -1077,6 +1091,9 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 					   " send UPDATE BGP-LS NLRI -- unreachable",
 					   subgrp->update_group->id, subgrp->id);
 
+			bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
+					   addpath_tx_id, true, true);
+
 			subgrp->scount--;
 			bgp_adj_out_remove_subgroup(dest, adj, subgrp);
 			continue;
@@ -1148,6 +1165,9 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 				   subgrp->update_group->id, subgrp->id,
 				   pfx_buf);
 		}
+
+		bgp_adj_out_update(subgrp, dest, NULL, NULL, NULL,
+				   addpath_tx_id, true, true);
 
 		subgrp->scount--;
 
