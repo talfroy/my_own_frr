@@ -57,8 +57,19 @@ struct bpacket *bpacket_alloc(void)
 	struct bpacket *pkt;
 
 	pkt = XCALLOC(MTYPE_BGP_PACKET, sizeof(struct bpacket));
+	TAILQ_INIT(&pkt->adjout);
 
 	return pkt;
+}
+
+static void bpacket_clear_adjout(struct bpacket *pkt)
+{
+	struct bpacket_adjout *adjout;
+
+	while ((adjout = TAILQ_FIRST(&pkt->adjout))) {
+		TAILQ_REMOVE(&pkt->adjout, adjout, pkt_train);
+		XFREE(MTYPE_BGP_PACKET, adjout);
+	}
 }
 
 void bpacket_free(struct bpacket *pkt)
@@ -66,6 +77,7 @@ void bpacket_free(struct bpacket *pkt)
 	if (pkt->buffer)
 		stream_free(pkt->buffer);
 	pkt->buffer = NULL;
+	bpacket_clear_adjout(pkt);
 	XFREE(MTYPE_BGP_PACKET, pkt);
 }
 
@@ -165,6 +177,45 @@ struct bpacket *bpacket_queue_remove(struct bpacket_queue *q)
 		q->curr_count--;
 	}
 	return first;
+}
+
+void bpacket_add_adjout(struct bpacket *pkt, afi_t afi, safi_t safi,
+			const struct bgp_dest *dest, uint32_t addpath_tx_id)
+{
+	struct bpacket_adjout *adjout;
+
+	if (!pkt || !dest)
+		return;
+
+	adjout = XCALLOC(MTYPE_BGP_PACKET, sizeof(*adjout));
+	adjout->afi = afi;
+	adjout->safi = safi;
+	prefix_copy(&adjout->p, bgp_dest_get_prefix(dest));
+	adjout->addpath_tx_id = addpath_tx_id;
+
+	if (((afi == AFI_L2VPN && safi == SAFI_EVPN) ||
+	     safi == SAFI_MPLS_VPN) &&
+	    dest->pdest)
+		prefix_copy(&adjout->rd,
+			    (struct prefix_rd *)bgp_dest_get_prefix(dest->pdest));
+
+	TAILQ_INSERT_TAIL(&pkt->adjout, adjout, pkt_train);
+}
+
+void bpacket_copy_adjout(struct bpacket *dst, const struct bpacket *src)
+{
+	struct bpacket_adjout *adjout;
+
+	if (!dst || !src)
+		return;
+
+	TAILQ_FOREACH (adjout, &src->adjout, pkt_train) {
+		struct bpacket_adjout *copy;
+
+		copy = XCALLOC(MTYPE_BGP_PACKET, sizeof(*copy));
+		memcpy(copy, adjout, sizeof(*copy));
+		TAILQ_INSERT_TAIL(&dst->adjout, copy, pkt_train);
+	}
 }
 
 unsigned int bpacket_queue_length(struct bpacket_queue *q)
@@ -687,6 +738,7 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 	mpls_label_t labels[BGP_MAX_LABELS] = { MPLS_INVALID_LABEL };
 	uint8_t num_labels = 0;
 	struct bgp_ls_nlri *ls_nlri = NULL;
+	struct bpacket adjout_tmp = {};
 
 	if (!subgrp)
 		return NULL;
@@ -701,6 +753,7 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 	stream_reset(s);
 	snlri = subgrp->scratch;
 	stream_reset(snlri);
+	TAILQ_INIT(&adjout_tmp.adjout);
 
 	bpacket_attr_vec_arr_reset(&vecarr);
 
@@ -883,6 +936,8 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 		}
 
 		num_pfx++;
+		bpacket_add_adjout(&adjout_tmp, afi, safi, dest,
+				   addpath_tx_id);
 
 		if (bgp_debug_update(NULL, dest_p, subgrp->update_group, 0)) {
 			char pfx_buf[BGP_PRD_PATH_STRLEN];
@@ -954,10 +1009,13 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 				 - stream_get_getp(packet)),
 				peer->max_packet_size, num_pfx);
 		pkt = bpacket_queue_add(SUBGRP_PKTQ(subgrp), packet, &vecarr);
+		bpacket_copy_adjout(pkt, &adjout_tmp);
+		bpacket_clear_adjout(&adjout_tmp);
 		stream_reset(s);
 		stream_reset(snlri);
 		return pkt;
 	}
+	bpacket_clear_adjout(&adjout_tmp);
 	return NULL;
 }
 
@@ -995,6 +1053,7 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 	uint32_t addpath_tx_id = 0;
 	const struct prefix_rd *prd = NULL;
 	struct bgp_ls_nlri *ls_nlri = NULL;
+	struct bpacket adjout_tmp = {};
 
 
 	if (!subgrp)
@@ -1010,6 +1069,7 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 	stream_reset(s);
 	addpath_capable = bgp_addpath_encode_tx(peer, afi, safi);
 	addpath_overhead = addpath_capable ? BGP_ADDPATH_ID_LEN : 0;
+	TAILQ_INIT(&adjout_tmp.adjout);
 
 	while ((adv = bgp_adv_fifo_first(&subgrp->sync->withdraw)) != NULL) {
 		const struct prefix *dest_p;
@@ -1071,6 +1131,8 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 			}
 
 			num_pfx++;
+			bpacket_add_adjout(&adjout_tmp, afi, safi, dest,
+					   addpath_tx_id);
 
 			if (bgp_debug_update(NULL, NULL, subgrp->update_group, 0))
 				zlog_debug("u%" PRIu64 ":s%" PRIu64
@@ -1137,6 +1199,8 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 		}
 
 		num_pfx++;
+		bpacket_add_adjout(&adjout_tmp, afi, safi, dest,
+				   addpath_tx_id);
 
 		if (bgp_debug_update(NULL, dest_p, subgrp->update_group, 0)) {
 			char pfx_buf[BGP_PRD_PATH_STRLEN];
@@ -1181,10 +1245,13 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 
 		pkt = bpacket_queue_add(SUBGRP_PKTQ(subgrp), stream_dup(s),
 					NULL);
+		bpacket_copy_adjout(pkt, &adjout_tmp);
+		bpacket_clear_adjout(&adjout_tmp);
 		stream_reset(s);
 		return pkt;
 	}
 
+	bpacket_clear_adjout(&adjout_tmp);
 	return NULL;
 }
 

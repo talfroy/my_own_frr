@@ -78,6 +78,18 @@ typedef struct bpacket_attr_vec_arr {
 	bpacket_attr_vec entries[BGP_ATTR_VEC_MAX];
 } bpacket_attr_vec_arr;
 
+struct bpacket_adjout {
+	TAILQ_ENTRY(bpacket_adjout) pkt_train;
+
+	afi_t afi;
+	safi_t safi;
+	struct prefix p;
+	struct prefix_rd rd;
+	uint32_t addpath_tx_id;
+};
+
+TAILQ_HEAD(bpacket_adjout_head, bpacket_adjout);
+
 struct bpacket {
 	/* for being part of an update subgroup's message list */
 	TAILQ_ENTRY(bpacket) pkt_train;
@@ -87,6 +99,7 @@ struct bpacket {
 
 	struct stream *buffer;
 	bpacket_attr_vec_arr arr;
+	struct bpacket_adjout_head adjout;
 
 	unsigned int ver;
 };
@@ -398,6 +411,10 @@ extern struct bpacket *subgroup_update_packet(struct update_subgroup *s);
 extern struct bpacket *subgroup_withdraw_packet(struct update_subgroup *s);
 extern struct stream *bpacket_reformat_for_peer(struct bpacket *pkt,
 						struct peer_af *paf);
+extern void bpacket_add_adjout(struct bpacket *pkt, afi_t afi, safi_t safi,
+			       const struct bgp_dest *dest,
+			       uint32_t addpath_tx_id);
+extern void bpacket_copy_adjout(struct bpacket *dst, const struct bpacket *src);
 extern void bpacket_attr_vec_arr_reset(struct bpacket_attr_vec_arr *vecarr);
 extern void bpacket_attr_vec_arr_set_vec(struct bpacket_attr_vec_arr *vecarr,
 					 enum bpacket_attr_vec_type type,

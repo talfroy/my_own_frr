@@ -21,6 +21,7 @@ struct bgp_route_evpn;
 struct attr;
 struct bgp_labels;
 struct update_subgroup;
+struct bpacket;
 
 enum bgp_show_type {
 	bgp_show_type_normal,
@@ -798,8 +799,9 @@ DECLARE_HOOK(bgp_adj_out_update,
 	      withdraw));
 
 DECLARE_HOOK(bgp_adj_out_packet_send,
-	     (struct peer *peer, afi_t afi, safi_t safi, struct stream *s),
-	     (peer, afi, safi, s));
+	     (struct peer *peer, afi_t afi, safi_t safi,
+	      const struct bpacket *pkt, struct stream *s),
+	     (peer, afi, safi, pkt, s));
 
 extern int bgp_adj_out_update(struct update_subgroup *subgrp,
 			      struct bgp_dest *dest, struct bgp_path_info *path,

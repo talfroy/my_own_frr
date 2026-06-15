@@ -368,6 +368,51 @@ static void bmp_adjout_key_init(struct bmp_queue_entry *bqeref, afi_t afi,
 			    (struct prefix_rd *)bgp_dest_get_prefix(bn->pdest));
 }
 
+static void bmp_adjout_key_init_prefix(struct bmp_queue_entry *bqeref,
+				       const struct bpacket_adjout *adjout,
+				       struct peer *peer)
+{
+	memset(bqeref, 0, sizeof(*bqeref));
+	prefix_copy(&bqeref->p, &adjout->p);
+	prefix_copy(&bqeref->rd, &adjout->rd);
+	bqeref->peerid = peer->qobj_node.nid;
+	bqeref->afi = adjout->afi;
+	bqeref->safi = adjout->safi;
+	bqeref->addpath_tx_id = adjout->addpath_tx_id;
+	bqeref->out_post_policy = false;
+}
+
+static void bmp_flush_adjout_pre(struct bmp_targets *bt, struct peer *peer,
+				 const struct bpacket_adjout *adjout)
+{
+	struct bmp_queue_entry bqeref;
+	struct bmp_queue_entry *bqe;
+
+	bmp_adjout_key_init_prefix(&bqeref, adjout, peer);
+
+	bqe = bmp_rbtree_find(&bt->outpreh, &bqeref);
+	if (bqe) {
+		bmp_rbtree_del(&bt->outpreh, bqe);
+		bmp_queue_entry_free(bqe);
+	}
+
+	bqe = bmp_rbtree_find(&bt->outupdhash, &bqeref);
+	if (bqe) {
+		struct bmp *bmp;
+		struct bmp_queue_entry *next;
+
+		next = bmp_qlist_next(&bt->outupdlist, bqe);
+		frr_each (bmp_session, &bt->sessions, bmp) {
+			if (bmp->out_queuepos == bqe)
+				bmp->out_queuepos = next;
+		}
+
+		bmp_rbtree_del(&bt->outupdhash, bqe);
+		bmp_qlist_del(&bt->outupdlist, bqe);
+		bmp_queue_entry_free(bqe);
+	}
+}
+
 static inline int bmp_get_peer_distinguisher(struct bgp *bgp, afi_t afi, uint8_t peer_type,
 					     uint64_t *result_ref)
 {
@@ -2398,6 +2443,7 @@ static int bmp_process_adjout(struct update_subgroup *subgrp,
 }
 
 static int bmp_adj_out_packet_send(struct peer *peer, afi_t afi, safi_t safi,
+				   const struct bpacket *pkt,
 				   struct stream *packet)
 {
 	struct bmp_bgp *bmpbgp;
@@ -2405,6 +2451,7 @@ static int bmp_adj_out_packet_send(struct peer *peer, afi_t afi, safi_t safi,
 	struct bmp *bmp;
 	struct bgp *bgp_vrf;
 	struct listnode *node;
+	const struct bpacket_adjout *adjout;
 
 	if (!peer || !peer->bgp || !packet)
 		return 0;
@@ -2421,6 +2468,11 @@ static int bmp_adj_out_packet_send(struct peer *peer, afi_t afi, safi_t safi,
 			if (bgp_vrf != peer->bgp &&
 			    !bmp_imported_bgp_find(bt, peer->bgp->name))
 				continue;
+
+			if (pkt) {
+				TAILQ_FOREACH (adjout, &pkt->adjout, pkt_train)
+					bmp_flush_adjout_pre(bt, peer, adjout);
+			}
 
 			frr_each (bmp_session, &bt->sessions, bmp)
 				bmp_monitor_adjout_packet(bmp, peer, afi, safi,
