@@ -1964,6 +1964,55 @@ out:
 	return written;
 }
 
+static void bmp_adjout_pre_retry(struct event *event)
+{
+	struct bmp *bmp = EVENT_ARG(event);
+
+	pullwr_bump(bmp->pullwr);
+}
+
+static void bmp_adjout_pre_defer(struct bmp *bmp)
+{
+	if (!event_is_scheduled(bmp->t_adjout_pre_retry))
+		event_add_timer_msec(bm->master, bmp_adjout_pre_retry, bmp,
+				     50, &bmp->t_adjout_pre_retry);
+}
+
+static bool bmp_adjout_pre_has_pending_post(struct peer *peer, afi_t afi,
+					    safi_t safi)
+{
+	struct peer_af *paf;
+
+	paf = peer_af_find(peer, afi, safi);
+	if (!paf || !paf->subgroup)
+		return false;
+
+	if (paf->next_pkt_to_send && paf->next_pkt_to_send->buffer)
+		return true;
+
+	if (subgroup_packets_to_build(paf->subgroup))
+		return true;
+
+	if (event_is_scheduled(peer->connection->t_generate_updgrp_packets))
+		return true;
+
+	return false;
+}
+
+static bool bmp_wrqueue_adjout_drop(struct bmp *bmp)
+{
+	struct bmp_queue_entry *bqe;
+
+	bqe = bmp_pull_adjout(bmp);
+	if (bqe && !bqe->refcount)
+		bmp_queue_entry_free(bqe);
+
+	if (bmp->out_queuepos)
+		pullwr_bump(bmp->pullwr);
+
+	return false;
+}
+
 static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 {
 	struct bmp_queue_entry *bqe;
@@ -1972,7 +2021,7 @@ static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 	uint8_t num_labels = 0;
 	mpls_label_t *label = NULL;
 
-	bqe = bmp_pull_adjout(bmp);
+	bqe = bmp->out_queuepos;
 	if (!bqe)
 		return false;
 
@@ -1982,15 +2031,27 @@ static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 						: BMP_MON_OUT_PREPOLICY;
 
 	if (!CHECK_FLAG(bmp->targets->afimon[afi][safi], mon_flag))
-		goto out;
+		return bmp_wrqueue_adjout_drop(bmp);
 
 	peer = QOBJ_GET_TYPESAFE(bqe->peerid, peer);
 	if (!peer) {
 		zlog_info("bmp: skipping adj-rib-out queued item for deleted peer");
-		goto out;
+		return bmp_wrqueue_adjout_drop(bmp);
 	}
 	if (!peer_established(peer->connection))
-		goto out;
+		return bmp_wrqueue_adjout_drop(bmp);
+
+	if (!bqe->out_post_policy &&
+	    CHECK_FLAG(bmp->targets->afimon[afi][safi],
+		       BMP_MON_OUT_POSTPOLICY) &&
+	    bmp_adjout_pre_has_pending_post(peer, afi, safi)) {
+		bmp_adjout_pre_defer(bmp);
+		return false;
+	}
+
+	bqe = bmp_pull_adjout(bmp);
+	if (!bqe)
+		return false;
 
 	from = bqe->out_post_policy ? bqe->source_peer : peer;
 
@@ -2725,6 +2786,7 @@ static void bmp_close(struct bmp *bmp)
 	struct bmp_mirrorq *bmq;
 
 	event_cancel(&bmp->t_read);
+	event_cancel(&bmp->t_adjout_pre_retry);
 
 	if (bmp->active)
 		bmp_active_disconnected(bmp->active);
@@ -2743,6 +2805,7 @@ static void bmp_close(struct bmp *bmp)
 			bmp_queue_entry_free(bqe);
 
 	event_cancel(&bmp->t_read);
+	event_cancel(&bmp->t_adjout_pre_retry);
 	pullwr_del(bmp->pullwr);
 	close(bmp->socket);
 }

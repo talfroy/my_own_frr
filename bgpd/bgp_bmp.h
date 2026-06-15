@@ -119,6 +119,7 @@ struct bmp {
 	int socket;
 	char remote[SU_ADDRSTRLEN + 6];
 	struct event *t_read;
+	struct event *t_adjout_pre_retry;
 
 	struct pullwr *pullwr;
 
