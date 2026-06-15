@@ -368,51 +368,6 @@ static void bmp_adjout_key_init(struct bmp_queue_entry *bqeref, afi_t afi,
 			    (struct prefix_rd *)bgp_dest_get_prefix(bn->pdest));
 }
 
-static void bmp_adjout_key_init_prefix(struct bmp_queue_entry *bqeref,
-				       const struct bpacket_adjout *adjout,
-				       struct peer *peer)
-{
-	memset(bqeref, 0, sizeof(*bqeref));
-	prefix_copy(&bqeref->p, &adjout->p);
-	prefix_copy(&bqeref->rd, &adjout->rd);
-	bqeref->peerid = peer->qobj_node.nid;
-	bqeref->afi = adjout->afi;
-	bqeref->safi = adjout->safi;
-	bqeref->addpath_tx_id = adjout->addpath_tx_id;
-	bqeref->out_post_policy = false;
-}
-
-static void bmp_flush_adjout_pre(struct bmp_targets *bt, struct peer *peer,
-				 const struct bpacket_adjout *adjout)
-{
-	struct bmp_queue_entry bqeref;
-	struct bmp_queue_entry *bqe;
-
-	bmp_adjout_key_init_prefix(&bqeref, adjout, peer);
-
-	bqe = bmp_rbtree_find(&bt->outpreh, &bqeref);
-	if (bqe) {
-		bmp_rbtree_del(&bt->outpreh, bqe);
-		bmp_queue_entry_free(bqe);
-	}
-
-	bqe = bmp_rbtree_find(&bt->outupdhash, &bqeref);
-	if (bqe) {
-		struct bmp *bmp;
-		struct bmp_queue_entry *next;
-
-		next = bmp_qlist_next(&bt->outupdlist, bqe);
-		frr_each (bmp_session, &bt->sessions, bmp) {
-			if (bmp->out_queuepos == bqe)
-				bmp->out_queuepos = next;
-		}
-
-		bmp_rbtree_del(&bt->outupdhash, bqe);
-		bmp_qlist_del(&bt->outupdlist, bqe);
-		bmp_queue_entry_free(bqe);
-	}
-}
-
 static inline int bmp_get_peer_distinguisher(struct bgp *bgp, afi_t afi, uint8_t peer_type,
 					     uint64_t *result_ref)
 {
@@ -1487,41 +1442,6 @@ static void bmp_monitor_adjout(struct bmp *bmp, struct peer *peer,
 	stream_free(msg);
 }
 
-static void bmp_monitor_adjout_packet(struct bmp *bmp, struct peer *peer,
-				      afi_t afi, safi_t safi,
-				      struct stream *packet)
-{
-	struct stream *hdr, *msg;
-	uint8_t peer_type_flag = bmp_get_peer_type(peer);
-	uint8_t flags = bmp_route_monitor_flags(true, true);
-	uint64_t peer_distinguisher = 0;
-
-	if (bmp_get_peer_distinguisher(peer->bgp, afi, peer_type_flag,
-				       &peer_distinguisher)) {
-		zlog_warn(
-			"skipping bmp message for reason: can't get peer distinguisher");
-		return;
-	}
-
-	msg = stream_dup(packet);
-	if (!msg)
-		return;
-
-	hdr = stream_new(BGP_MAX_PACKET_SIZE);
-	bmp_common_hdr(hdr, BMP_VERSION_3, BMP_TYPE_ROUTE_MONITORING);
-	bmp_per_peer_hdr(hdr, peer->bgp, peer, flags, peer_type_flag,
-			 peer_distinguisher, NULL);
-
-	stream_putl_at(hdr, BMP_LENGTH_POS,
-		       stream_get_endp(hdr) + stream_get_endp(msg));
-
-	bmp->cnt_update++;
-	pullwr_write_stream(bmp->pullwr, hdr);
-	pullwr_write_stream(bmp->pullwr, msg);
-	stream_free(hdr);
-	stream_free(msg);
-}
-
 static struct bgp *bmp_get_next_bgp(struct bmp_targets *bt, struct bgp *bgp, afi_t afi, safi_t safi)
 {
 	struct bmp_imported_bgp *bib;
@@ -1855,21 +1775,9 @@ static inline struct bmp_queue_entry *bmp_pull_locrib(struct bmp *bmp)
 
 static inline struct bmp_queue_entry *bmp_pull_adjout(struct bmp *bmp)
 {
-	struct bmp_queue_entry *bqe;
-
-	bqe = bmp->out_queuepos;
-	if (!bqe)
-		return NULL;
-
-	bmp->out_queuepos = bmp_qlist_next(&bmp->targets->outupdlist, bqe);
-
-	bqe->refcount--;
-	if (!bqe->refcount) {
-		if (!bqe->out_post_policy)
-			bmp_rbtree_del(&bmp->targets->outupdhash, bqe);
-		bmp_qlist_del(&bmp->targets->outupdlist, bqe);
-	}
-	return bqe;
+	return bmp_pull_from_queue(&bmp->targets->outupdlist,
+				   &bmp->targets->outupdhash,
+				   &bmp->out_queuepos);
 }
 
 /* TODO BMP_MON_LOCRIB find a way to merge properly this function with
@@ -1964,55 +1872,6 @@ out:
 	return written;
 }
 
-static void bmp_adjout_pre_retry(struct event *event)
-{
-	struct bmp *bmp = EVENT_ARG(event);
-
-	pullwr_bump(bmp->pullwr);
-}
-
-static void bmp_adjout_pre_defer(struct bmp *bmp)
-{
-	if (!event_is_scheduled(bmp->t_adjout_pre_retry))
-		event_add_timer_msec(bm->master, bmp_adjout_pre_retry, bmp,
-				     50, &bmp->t_adjout_pre_retry);
-}
-
-static bool bmp_adjout_pre_has_pending_post(struct peer *peer, afi_t afi,
-					    safi_t safi)
-{
-	struct peer_af *paf;
-
-	paf = peer_af_find(peer, afi, safi);
-	if (!paf || !paf->subgroup)
-		return false;
-
-	if (paf->next_pkt_to_send && paf->next_pkt_to_send->buffer)
-		return true;
-
-	if (subgroup_packets_to_build(paf->subgroup))
-		return true;
-
-	if (event_is_scheduled(peer->connection->t_generate_updgrp_packets))
-		return true;
-
-	return false;
-}
-
-static bool bmp_wrqueue_adjout_drop(struct bmp *bmp)
-{
-	struct bmp_queue_entry *bqe;
-
-	bqe = bmp_pull_adjout(bmp);
-	if (bqe && !bqe->refcount)
-		bmp_queue_entry_free(bqe);
-
-	if (bmp->out_queuepos)
-		pullwr_bump(bmp->pullwr);
-
-	return false;
-}
-
 static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 {
 	struct bmp_queue_entry *bqe;
@@ -2021,7 +1880,7 @@ static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 	uint8_t num_labels = 0;
 	mpls_label_t *label = NULL;
 
-	bqe = bmp->out_queuepos;
+	bqe = bmp_pull_adjout(bmp);
 	if (!bqe)
 		return false;
 
@@ -2031,27 +1890,15 @@ static bool bmp_wrqueue_adjout(struct bmp *bmp, struct pullwr *pullwr)
 						: BMP_MON_OUT_PREPOLICY;
 
 	if (!CHECK_FLAG(bmp->targets->afimon[afi][safi], mon_flag))
-		return bmp_wrqueue_adjout_drop(bmp);
+		goto out;
 
 	peer = QOBJ_GET_TYPESAFE(bqe->peerid, peer);
 	if (!peer) {
 		zlog_info("bmp: skipping adj-rib-out queued item for deleted peer");
-		return bmp_wrqueue_adjout_drop(bmp);
+		goto out;
 	}
 	if (!peer_established(peer->connection))
-		return bmp_wrqueue_adjout_drop(bmp);
-
-	if (!bqe->out_post_policy &&
-	    CHECK_FLAG(bmp->targets->afimon[afi][safi],
-		       BMP_MON_OUT_POSTPOLICY) &&
-	    bmp_adjout_pre_has_pending_post(peer, afi, safi)) {
-		bmp_adjout_pre_defer(bmp);
-		return false;
-	}
-
-	bqe = bmp_pull_adjout(bmp);
-	if (!bqe)
-		return false;
+		goto out;
 
 	from = bqe->out_post_policy ? bqe->source_peer : peer;
 
@@ -2357,20 +2204,10 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	if (refcount == 0)
 		return NULL;
 
-	if (post_policy) {
-		bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
-		memcpy(bqe, &bqeref, sizeof(*bqe));
-		bmp_queue_entry_set_source(bqe, from);
-		bmp_queue_entry_update_attr(bqe, attr, labels);
-		bqe->refcount = refcount;
-		bmp_qlist_add_tail(&bt->outupdlist, bqe);
-		return bqe;
-	}
-
 	bqe = bmp_rbtree_find(&bt->outupdhash, &bqeref);
 	if (bqe) {
 		bqe->source_peerid = bqeref.source_peerid;
-		bmp_queue_entry_set_source(bqe, NULL);
+		bmp_queue_entry_set_source(bqe, post_policy ? from : NULL);
 		bmp_queue_entry_update_attr(bqe, attr, labels);
 		if (bqe->refcount >= refcount)
 			return NULL;
@@ -2379,7 +2216,7 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	} else {
 		bqe = XMALLOC(MTYPE_BMP_QUEUE, sizeof(*bqe));
 		memcpy(bqe, &bqeref, sizeof(*bqe));
-		bmp_queue_entry_set_source(bqe, NULL);
+		bmp_queue_entry_set_source(bqe, post_policy ? from : NULL);
 		bmp_queue_entry_update_attr(bqe, attr, labels);
 
 		bmp_rbtree_add(&bt->outupdhash, bqe);
@@ -2459,10 +2296,8 @@ static int bmp_process_adjout(struct update_subgroup *subgrp,
 	struct bmp_queue_entry *last_item;
 	afi_t afi = SUBGRP_AFI(subgrp);
 	safi_t safi = SUBGRP_SAFI(subgrp);
-	uint8_t mon_flag = BMP_MON_OUT_PREPOLICY;
-
-	if (post_policy)
-		return 0;
+	uint8_t mon_flag = post_policy ? BMP_MON_OUT_POSTPOLICY
+				       : BMP_MON_OUT_PREPOLICY;
 
 	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp_vrf)) {
 		bmpbgp = bmp_bgp_find(bgp_vrf);
@@ -2497,47 +2332,6 @@ static int bmp_process_adjout(struct update_subgroup *subgrp,
 					pullwr_bump(bmp->pullwr);
 				}
 			}
-		}
-	}
-
-	return 0;
-}
-
-static int bmp_adj_out_packet_send(struct peer *peer, afi_t afi, safi_t safi,
-				   const struct bpacket *pkt,
-				   struct stream *packet)
-{
-	struct bmp_bgp *bmpbgp;
-	struct bmp_targets *bt;
-	struct bmp *bmp;
-	struct bgp *bgp_vrf;
-	struct listnode *node;
-	const struct bpacket_adjout *adjout;
-
-	if (!peer || !peer->bgp || !packet)
-		return 0;
-
-	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp_vrf)) {
-		bmpbgp = bmp_bgp_find(bgp_vrf);
-		if (!bmpbgp)
-			continue;
-
-		frr_each (bmp_targets, &bmpbgp->targets, bt) {
-			if (!CHECK_FLAG(bt->afimon[afi][safi],
-					BMP_MON_OUT_POSTPOLICY))
-				continue;
-			if (bgp_vrf != peer->bgp &&
-			    !bmp_imported_bgp_find(bt, peer->bgp->name))
-				continue;
-
-			if (pkt) {
-				TAILQ_FOREACH (adjout, &pkt->adjout, pkt_train)
-					bmp_flush_adjout_pre(bt, peer, adjout);
-			}
-
-			frr_each (bmp_session, &bt->sessions, bmp)
-				bmp_monitor_adjout_packet(bmp, peer, afi, safi,
-							  packet);
 		}
 	}
 
@@ -2786,7 +2580,6 @@ static void bmp_close(struct bmp *bmp)
 	struct bmp_mirrorq *bmq;
 
 	event_cancel(&bmp->t_read);
-	event_cancel(&bmp->t_adjout_pre_retry);
 
 	if (bmp->active)
 		bmp_active_disconnected(bmp->active);
@@ -2800,12 +2593,13 @@ static void bmp_close(struct bmp *bmp)
 	while ((bqe = bmp_pull_locrib(bmp)))
 		if (!bqe->refcount)
 			bmp_queue_entry_free(bqe);
-	while ((bqe = bmp_pull_adjout(bmp)))
+	while ((bqe = bmp_pull_from_queue(&bmp->targets->outupdlist,
+					  &bmp->targets->outupdhash,
+					  &bmp->out_queuepos)))
 		if (!bqe->refcount)
 			bmp_queue_entry_free(bqe);
 
 	event_cancel(&bmp->t_read);
-	event_cancel(&bmp->t_adjout_pre_retry);
 	pullwr_del(bmp->pullwr);
 	close(bmp->socket);
 }
@@ -4393,7 +4187,6 @@ static int bgp_bmp_module_init(void)
 	hook_register(peer_backward_transition, bmp_peer_backward);
 	hook_register(bgp_process, bmp_process);
 	hook_register(bgp_adj_out_update, bmp_process_adjout);
-	hook_register(bgp_adj_out_packet_send, bmp_adj_out_packet_send);
 	hook_register(bgp_nht_path_update, bmp_nht_path_valid);
 	hook_register(bgp_inst_config_write, bmp_config_write);
 	hook_register(bgp_inst_delete, bmp_bgp_del);

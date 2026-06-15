@@ -1593,11 +1593,8 @@ static int update_subgroup_copy_packets(struct update_subgroup *dest,
 
 	count = 0;
 	while (pkt && pkt->buffer) {
-		struct bpacket *copy;
-
-		copy = bpacket_queue_add(SUBGRP_PKTQ(dest),
-					 stream_dup(pkt->buffer), &pkt->arr);
-		bpacket_copy_adjout(copy, pkt);
+		bpacket_queue_add(SUBGRP_PKTQ(dest), stream_dup(pkt->buffer),
+				  &pkt->arr);
 		count++;
 		pkt = bpacket_next(pkt);
 	}

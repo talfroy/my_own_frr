@@ -62,11 +62,6 @@ DEFINE_HOOK(bgp_packet_send,
 			struct stream *s),
 		(peer, type, size, s));
 
-DEFINE_HOOK(bgp_adj_out_packet_send,
-	    (struct peer *peer, afi_t afi, safi_t safi,
-	     const struct bpacket *pkt, struct stream *s),
-	    (peer, afi, safi, pkt, s));
-
 /**
  * Sets marker and type fields for a BGP message.
  *
@@ -618,8 +613,6 @@ void bgp_generate_updgrp_packets(struct event *event)
 			s = bpacket_reformat_for_peer(next_pkt, paf);
 			assert(s);
 			bgp_packet_add(connection, s);
-			hook_call(bgp_adj_out_packet_send, peer, afi, safi,
-				  next_pkt, s);
 			bpacket_queue_advance_peer(paf);
 		}
 	} while (s && (++generated < wpq) && (connection->obuf->count <= bm->outq_limit) &&
