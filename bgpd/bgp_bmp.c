@@ -1442,6 +1442,41 @@ static void bmp_monitor_adjout(struct bmp *bmp, struct peer *peer,
 	stream_free(msg);
 }
 
+static void bmp_monitor_adjout_packet(struct bmp *bmp, struct peer *peer,
+				      afi_t afi, safi_t safi,
+				      struct stream *packet)
+{
+	struct stream *hdr, *msg;
+	uint8_t peer_type_flag = bmp_get_peer_type(peer);
+	uint8_t flags = bmp_route_monitor_flags(true, true);
+	uint64_t peer_distinguisher = 0;
+
+	if (bmp_get_peer_distinguisher(peer->bgp, afi, peer_type_flag,
+				       &peer_distinguisher)) {
+		zlog_warn(
+			"skipping bmp message for reason: can't get peer distinguisher");
+		return;
+	}
+
+	msg = stream_dup(packet);
+	if (!msg)
+		return;
+
+	hdr = stream_new(BGP_MAX_PACKET_SIZE);
+	bmp_common_hdr(hdr, BMP_VERSION_3, BMP_TYPE_ROUTE_MONITORING);
+	bmp_per_peer_hdr(hdr, peer->bgp, peer, flags, peer_type_flag,
+			 peer_distinguisher, NULL);
+
+	stream_putl_at(hdr, BMP_LENGTH_POS,
+		       stream_get_endp(hdr) + stream_get_endp(msg));
+
+	bmp->cnt_update++;
+	pullwr_write_stream(bmp->pullwr, hdr);
+	pullwr_write_stream(bmp->pullwr, msg);
+	stream_free(hdr);
+	stream_free(msg);
+}
+
 static struct bgp *bmp_get_next_bgp(struct bmp_targets *bt, struct bgp *bgp, afi_t afi, safi_t safi)
 {
 	struct bmp_imported_bgp *bib;
@@ -2318,8 +2353,10 @@ static int bmp_process_adjout(struct update_subgroup *subgrp,
 	struct bmp_queue_entry *last_item;
 	afi_t afi = SUBGRP_AFI(subgrp);
 	safi_t safi = SUBGRP_SAFI(subgrp);
-	uint8_t mon_flag = post_policy ? BMP_MON_OUT_POSTPOLICY
-				       : BMP_MON_OUT_PREPOLICY;
+	uint8_t mon_flag = BMP_MON_OUT_PREPOLICY;
+
+	if (post_policy)
+		return 0;
 
 	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp_vrf)) {
 		bmpbgp = bmp_bgp_find(bgp_vrf);
@@ -2354,6 +2391,40 @@ static int bmp_process_adjout(struct update_subgroup *subgrp,
 					pullwr_bump(bmp->pullwr);
 				}
 			}
+		}
+	}
+
+	return 0;
+}
+
+static int bmp_adj_out_packet_send(struct peer *peer, afi_t afi, safi_t safi,
+				   struct stream *packet)
+{
+	struct bmp_bgp *bmpbgp;
+	struct bmp_targets *bt;
+	struct bmp *bmp;
+	struct bgp *bgp_vrf;
+	struct listnode *node;
+
+	if (!peer || !peer->bgp || !packet)
+		return 0;
+
+	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp_vrf)) {
+		bmpbgp = bmp_bgp_find(bgp_vrf);
+		if (!bmpbgp)
+			continue;
+
+		frr_each (bmp_targets, &bmpbgp->targets, bt) {
+			if (!CHECK_FLAG(bt->afimon[afi][safi],
+					BMP_MON_OUT_POSTPOLICY))
+				continue;
+			if (bgp_vrf != peer->bgp &&
+			    !bmp_imported_bgp_find(bt, peer->bgp->name))
+				continue;
+
+			frr_each (bmp_session, &bt->sessions, bmp)
+				bmp_monitor_adjout_packet(bmp, peer, afi, safi,
+							  packet);
 		}
 	}
 
@@ -4207,6 +4278,7 @@ static int bgp_bmp_module_init(void)
 	hook_register(peer_backward_transition, bmp_peer_backward);
 	hook_register(bgp_process, bmp_process);
 	hook_register(bgp_adj_out_update, bmp_process_adjout);
+	hook_register(bgp_adj_out_packet_send, bmp_adj_out_packet_send);
 	hook_register(bgp_nht_path_update, bmp_nht_path_valid);
 	hook_register(bgp_inst_config_write, bmp_config_write);
 	hook_register(bgp_inst_delete, bmp_bgp_del);
