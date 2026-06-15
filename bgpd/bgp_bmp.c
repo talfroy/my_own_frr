@@ -1780,6 +1780,49 @@ static inline struct bmp_queue_entry *bmp_pull_adjout(struct bmp *bmp)
 				   &bmp->out_queuepos);
 }
 
+static bool bmp_adjout_pre_entry_matches(const struct bmp_queue_entry *bqe,
+					 uint64_t peerid, afi_t afi,
+					 safi_t safi)
+{
+	return !bqe->out_post_policy && bqe->peerid == peerid &&
+	       bqe->afi == afi && bqe->safi == safi;
+}
+
+static struct bmp_queue_entry *
+bmp_flush_adjout_pre(struct bmp_targets *bt, uint64_t peerid, afi_t afi,
+		     safi_t safi, size_t refcount)
+{
+	struct bmp_queue_entry *bqe, *queued;
+	struct bmp_queue_entry *first = NULL;
+	struct bmp_rbtree_head keep;
+
+	bmp_rbtree_init(&keep);
+	while ((bqe = bmp_rbtree_pop(&bt->outpreh))) {
+		if (!bmp_adjout_pre_entry_matches(bqe, peerid, afi, safi)) {
+			bmp_rbtree_add(&keep, bqe);
+			continue;
+		}
+
+		queued = bmp_rbtree_find(&bt->outupdhash, bqe);
+		if (queued) {
+			if (!first)
+				first = queued;
+			bmp_queue_entry_free(bqe);
+			continue;
+		}
+
+		bqe->refcount = refcount;
+		bmp_rbtree_add(&bt->outupdhash, bqe);
+		bmp_qlist_add_tail(&bt->outupdlist, bqe);
+		if (!first)
+			first = bqe;
+	}
+	bmp_rbtree_swap_all(&bt->outpreh, &keep);
+	bmp_rbtree_fini(&keep);
+
+	return first;
+}
+
 /* TODO BMP_MON_LOCRIB find a way to merge properly this function with
  * bmp_wrqueue or abstract it if possible
  */
@@ -2191,6 +2234,7 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 		       uint32_t addpath_tx_id, bool post_policy)
 {
 	struct bmp_queue_entry *bqe, bqeref;
+	struct bmp_queue_entry *first_item = NULL;
 	size_t refcount;
 
 	refcount = bmp_session_count(&bt->sessions);
@@ -2204,13 +2248,18 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	if (refcount == 0)
 		return NULL;
 
+	if (post_policy)
+		first_item =
+			bmp_flush_adjout_pre(bt, bqeref.peerid, afi, safi,
+					     refcount);
+
 	bqe = bmp_rbtree_find(&bt->outupdhash, &bqeref);
 	if (bqe) {
 		bqe->source_peerid = bqeref.source_peerid;
 		bmp_queue_entry_set_source(bqe, post_policy ? from : NULL);
 		bmp_queue_entry_update_attr(bqe, attr, labels);
 		if (bqe->refcount >= refcount)
-			return NULL;
+			return first_item;
 
 		bmp_qlist_del(&bt->outupdlist, bqe);
 	} else {
@@ -2225,7 +2274,7 @@ bmp_process_one_adjout(struct bmp_targets *bt, afi_t afi, safi_t safi,
 	bqe->refcount = refcount;
 	bmp_qlist_add_tail(&bt->outupdlist, bqe);
 
-	return bqe;
+	return first_item ? first_item : bqe;
 }
 
 static int bmp_process(struct bgp *bgp, afi_t afi, safi_t safi,
