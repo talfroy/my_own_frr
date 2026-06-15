@@ -68,6 +68,7 @@ struct bmp_queue_entry {
 	bool out_post_policy;
 
 	size_t refcount;
+	bool in_hash;
 	uint64_t source_peerid;
 
 	/* initialized only for L2VPN/EVPN (S)AFIs */
@@ -255,6 +256,7 @@ struct bmp_targets {
 	struct bmp_rbtree_head outupdhash;
 	struct bmp_qlist_head outupdlist;
 
+	struct bmp_qlist_head outprelist;
 	struct bmp_rbtree_head outpreh;
 
 	struct bmp_imported_bgps_head imported_bgps;
