@@ -5605,7 +5605,8 @@ bgp_size_t bgp_packet_attribute(struct bgp *bgp, struct peer *peer, struct strea
 
 	/* Local preference. */
 	if (peer->sort == BGP_PEER_IBGP || peer->sort == BGP_PEER_CONFED ||
-	    peer->sub_sort == BGP_PEER_EBGP_OAD) {
+	    peer->sub_sort == BGP_PEER_EBGP_OAD ||
+	    (for_bmp && bgp_attr_exists(attr, BGP_ATTR_LOCAL_PREF))) {
 		stream_putc(s, BGP_ATTR_FLAG_TRANS);
 		stream_putc(s, BGP_ATTR_LOCAL_PREF);
 		stream_putc(s, 4);
